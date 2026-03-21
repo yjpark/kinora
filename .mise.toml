@@ -1,0 +1,39 @@
+[tasks._beans-serve]
+run = 'beans-serve --cors-origin "*"'
+description = "Start beans dev server"
+
+[tasks.dev]
+run = "cd crates/litmus-web && dx serve --port 8883 --addr 0.0.0.0"
+description = "Run Dioxus dev server"
+
+[tasks.build-web]
+run = "cd crates/litmus-web && dx build --release"
+description = "Build web frontend (release)"
+
+[tasks.build-cli]
+run = "cargo build --release --package litmus-cli"
+description = "Build CLI binary (release)"
+
+[tasks._cli]
+run = "cargo run --package litmus-cli"
+description = "Run the litmus TUI"
+
+[tasks.check]
+run = "cargo check --workspace"
+description = "Type-check workspace"
+
+[tasks.fmt]
+run = "cargo fmt --all"
+description = "Format all Rust code"
+
+[tasks._docs-serve]
+run = "cd docs && mdbook serve --port 8882 --hostname 0.0.0.0"
+description = "Start mdbook live-reload dev server"
+
+[tasks.docs-build]
+run = "cd docs && mdbook build"
+description = "Build mdbook static site"
+
+[tasks.bacon-claude-diagnostics]
+run = "bacon claude-diagnostics"
+description = "Run bacon background checker (exports diagnostics to .bacon-claude-diagnostics)"
