@@ -4,6 +4,12 @@
 
 Kinora is a knowledge management system built for the age of AI agents. Named after the [Kinora](https://en.wikipedia.org/wiki/Kinora) — an early motion picture device that turned individual cards into coherent moving images — Kinora turns discrete fragments of knowledge into composable, queryable, living structures.
 
+## Beads setup
+
+```bash
+bd dolt remote add origin git+https://github.com/edger-dev/kinora.git
+
+```
 ## Why Kinora?
 
 Traditional note-taking tools assume a human is typing and organizing. But increasingly, AI agents are the primary authors — researching, summarizing, drafting, linking. If your workflow has shifted from *writing notes* to *reviewing and composing agent-generated knowledge*, you need a system designed for that reality.
