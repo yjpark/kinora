@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "kinora",
+  "project_id": "64f86eaf-4227-46d8-8567-9df92f76be74"
+}
