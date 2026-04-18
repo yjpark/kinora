@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T15:24:34Z
+updated_at: 2026-04-18T15:28:59Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-fhw1
@@ -82,7 +82,7 @@ RFC-0003 sections: *Repository Layout*, *Content Store*, *Ledger*, *Provenance*.
 
 ## Acceptance
 
-- [ ] `.kinora/config.styx` parsed; `repo-url` required
+- [x] `.kinora/config.styx` parsed; `repo-url` required
 - [ ] Content store writes and reads BLAKE3-addressed blobs with sharded layout
 - [ ] Content store round-trips preserve exact bytes
 - [ ] Ledger appends JSONL events to current lineage file
