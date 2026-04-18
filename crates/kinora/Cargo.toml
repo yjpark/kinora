@@ -11,7 +11,9 @@ workspace = true
 [dependencies]
 blake3 = { workspace = true }
 facet = { workspace = true }
+facet-json = { workspace = true }
 facet-styx = { workspace = true }
+jiff = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T15:30:14Z
+updated_at: 2026-04-18T15:34:48Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-fhw1
@@ -85,15 +85,15 @@ RFC-0003 sections: *Repository Layout*, *Content Store*, *Ledger*, *Provenance*.
 - [x] `.kinora/config.styx` parsed; `repo-url` required
 - [x] Content store writes and reads BLAKE3-addressed blobs with sharded layout
 - [x] Content store round-trips preserve exact bytes
-- [ ] Ledger appends JSONL events to current lineage file
-- [ ] Ledger never modifies or deletes prior entries
-- [ ] Event envelope enforced: `kind`, `id`, `hash`, `parents[]`, `ts`, `author`, `provenance`, `metadata{}`
-- [ ] Namespace rules validated on write (bare reserved, `prefix::` extension)
-- [ ] Parent existence checked on append
+- [x] Ledger appends JSONL events to current lineage file
+- [x] Ledger never modifies or deletes prior entries
+- [x] Event envelope enforced: `kind`, `id`, `hash`, `parents[]`, `ts`, `author`, `provenance`, `metadata{}`
+- [x] Namespace rules validated on write (bare reserved, `prefix::` extension)
+- [x] Parent existence checked on append
 - [ ] First-store-on-new-branch mints new lineage file
-- [ ] `.kinora/HEAD` tracks current lineage
-- [ ] facet-based serialization for in-memory types
-- [ ] Unit tests cover round-trip, lineage creation, append invariants, metadata merge
+- [x] `.kinora/HEAD` tracks current lineage
+- [x] facet-based serialization for in-memory types
+- [x] Unit tests cover round-trip, lineage creation, append invariants, metadata merge
 
 
 ## `kinora init` (folded in)
