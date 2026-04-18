@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:03:56Z
+updated_at: 2026-04-18T16:09:00Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-5k13
@@ -51,16 +51,16 @@ kinora store <kind> [path] \
 
 ## Acceptance
 
-- [ ] Accepts content from stdin and file path
-- [ ] Records name (in metadata), kind, provenance, draft flag, timestamp
-- [ ] Provenance required (errors if missing)
-- [ ] Dedups store writes by hash; still appends ledger event
-- [ ] Validates namespace rules (reject unknown bare metadata keys)
-- [ ] Validates parent hashes exist in store
-- [ ] Mints new lineage file on first store in new branch
-- [ ] Appends to current lineage file when lineage exists
-- [ ] Updates `.kinora/HEAD` when minting new lineage
-- [ ] After running, workspace ready for `git add` + `git commit`
+- [x] Accepts content from stdin and file path
+- [x] Records name (in metadata), kind, provenance, draft flag, timestamp
+- [x] Provenance required (errors if missing)
+- [x] Dedups store writes by hash; still appends ledger event
+- [x] Validates namespace rules (reject unknown bare metadata keys)
+- [x] Validates parent hashes exist in store
+- [x] Mints new lineage file on first store in new branch
+- [x] Appends to current lineage file when lineage exists
+- [x] Updates `.kinora/HEAD` when minting new lineage
+- [x] After running, workspace ready for `git add` + `git commit`
 
 ## Plan
 

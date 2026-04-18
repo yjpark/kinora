@@ -14,3 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 kinora = { path = "../kinora" }
+facet = { workspace = true }
+figue = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
