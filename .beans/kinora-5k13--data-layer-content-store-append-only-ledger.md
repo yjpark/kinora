@@ -5,7 +5,7 @@ status: todo
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T14:23:45Z
+updated_at: 2026-04-18T15:23:02Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-fhw1
@@ -94,3 +94,26 @@ RFC-0003 sections: *Repository Layout*, *Content Store*, *Ledger*, *Provenance*.
 - [ ] `.kinora/HEAD` tracks current lineage
 - [ ] facet-based serialization for in-memory types
 - [ ] Unit tests cover round-trip, lineage creation, append invariants, metadata merge
+
+
+## `kinora init` (folded in)
+
+Bootstraps `.kinora/` in a repo:
+
+1. Refuse if `.kinora/` already exists
+2. Resolve `repo-url`:
+   - `--repo-url URL` if given
+   - else `git remote get-url origin` (via `gix`)
+   - else error, prompt user to pass `--repo-url`
+3. Create `.kinora/` with:
+   - `config.styx` containing `repo-url`
+   - empty `store/` and `ledger/` directories
+   - no `HEAD` yet (minted on first `store`)
+
+### Acceptance (init)
+
+- [ ] `kinora init` creates `.kinora/` with `config.styx` (only `repo-url`) + empty `store/` + empty `ledger/`
+- [ ] `--repo-url URL` overrides git remote
+- [ ] Falls back to `git remote get-url origin` via `gix`
+- [ ] Errors clearly if no remote and no flag given
+- [ ] Refuses to overwrite an existing `.kinora/`
