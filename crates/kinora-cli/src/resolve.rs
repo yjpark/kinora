@@ -3,7 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use kinora::event::Event;
-use kinora::hash::Hash;
+use kinora::hash::{Hash, SHORTHASH_LEN};
 use kinora::paths::kinora_root;
 use kinora::resolve::{ResolveError, Resolved, Resolver};
 
@@ -63,6 +63,10 @@ fn looks_like_hash(s: &str) -> bool {
     Hash::from_str(s).is_ok()
 }
 
+fn short(hex: &str) -> &str {
+    &hex[..hex.len().min(SHORTHASH_LEN)]
+}
+
 /// Render a MultipleHeads error as the actionable fork report from the
 /// bean spec. Written generically over any writer for testing.
 pub fn render_fork_report<W: Write>(
@@ -75,15 +79,15 @@ pub fn render_fork_report<W: Write>(
     writeln!(
         w,
         "kino `{name_or_id}` (id: {short}…) has {n} heads:",
-        short = &id[..id.len().min(8)],
+        short = short(id),
         n = heads.len()
     )?;
     for (head, lineage) in heads.iter().zip(lineages.iter()) {
-        let short_hash = &head.hash[..head.hash.len().min(8)];
         writeln!(
             w,
-            "  - {short_hash}… (lineage {lineage}, {} @ {})",
-            head.author, head.ts
+            "  - {short}… (lineage {lineage}, {} @ {})",
+            head.author, head.ts,
+            short = short(&head.hash)
         )?;
     }
     writeln!(w)?;
@@ -355,6 +359,42 @@ mod tests {
         assert!(s.contains("yj @ 2026-04-10T00:00:00Z"));
         assert!(s.contains("Reconcile via"));
         assert!(s.contains("kinora store markdown --id"));
+    }
+
+    #[test]
+    fn all_heads_rendering_lists_each_head() {
+        let heads = vec![
+            Event {
+                kind: "markdown".into(),
+                id: "a".repeat(64),
+                hash: "b".repeat(64),
+                parents: vec![],
+                ts: "2026-04-10T00:00:00Z".into(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                metadata: BTreeMap::new(),
+            },
+            Event {
+                kind: "markdown".into(),
+                id: "a".repeat(64),
+                hash: "c".repeat(64),
+                parents: vec![],
+                ts: "2026-04-12T00:00:00Z".into(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                metadata: BTreeMap::new(),
+            },
+        ];
+        let lineages = vec!["lllll1".to_string(), "lllll2".to_string()];
+        let mut buf = Vec::new();
+        render_all_heads(&mut buf, &"a".repeat(64), &heads, &lineages).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(&format!("id: {}", "a".repeat(64))));
+        assert!(s.contains("heads (2)"));
+        assert!(s.contains(&"b".repeat(64)));
+        assert!(s.contains(&"c".repeat(64)));
+        assert!(s.contains("lllll1"));
+        assert!(s.contains("lllll2"));
     }
 
     #[test]

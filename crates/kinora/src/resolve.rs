@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 use std::str::FromStr;
 
 use crate::event::Event;
@@ -282,10 +281,6 @@ fn parse_hash(value: &str) -> Result<Hash, ResolveError> {
     })
 }
 
-pub fn resolve_kinora_root(kinora_root: &Path) -> Result<Resolver, ResolveError> {
-    Resolver::load(kinora_root)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +428,61 @@ mod tests {
             .resolve_at_version(&birth.event.id, &bogus)
             .unwrap_err();
         assert!(matches!(err, ResolveError::VersionNotFound { .. }));
+    }
+
+    #[test]
+    fn branch_aware_tiebreak_picks_head_in_current_lineage() {
+        // Two heads exist on the same identity. HEAD points to one
+        // lineage; that lineage contains exactly one of the heads, so
+        // the resolver returns it instead of erroring.
+        let (_t, root) = setup();
+        let birth = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+
+        // Fork: store v2 on the same identity (lands in HEAD lineage)
+        // then hand-craft a sibling head in a separate lineage file so
+        // the tiebreaker has a clear winner.
+        let mut p = params("markdown", b"v2", "doc");
+        p.id = Some(birth.event.id.clone());
+        p.parents = vec![birth.event.hash.clone()];
+        p.ts = "2026-04-18T10:00:01Z".into();
+        let v2 = store_kino(&root, p).unwrap();
+
+        // Remove HEAD → mint a fresh lineage from a sibling, then restore
+        // HEAD to point at the first lineage.
+        let head_path = crate::paths::head_path(&root);
+        let original_head = std::fs::read_to_string(&head_path).unwrap();
+        std::fs::remove_file(&head_path).unwrap();
+
+        let mut sibling = params("markdown", b"right", "doc");
+        sibling.id = Some(birth.event.id.clone());
+        sibling.parents = vec![birth.event.hash.clone()];
+        sibling.ts = "2026-04-18T10:00:02Z".into();
+        store_kino(&root, sibling).unwrap();
+
+        std::fs::write(&head_path, original_head).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(&birth.event.id).unwrap();
+        // v2 lives in the HEAD lineage, so the tiebreaker picks it.
+        assert_eq!(resolved.content, b"v2");
+        assert_eq!(resolved.head.hash, v2.event.hash);
+        assert_eq!(resolved.all_heads.len(), 2);
+    }
+
+    #[test]
+    fn resolver_groups_events_across_multiple_lineage_files() {
+        // Two independent identities land in two separate lineage files
+        // (by removing HEAD between calls). Resolver::load must surface
+        // both identities.
+        let (_t, root) = setup();
+        let a = store_kino(&root, params("markdown", b"hi", "a")).unwrap();
+        std::fs::remove_file(crate::paths::head_path(&root)).unwrap();
+        let b = store_kino(&root, params("markdown", b"bye", "b")).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        assert!(resolver.identities().contains_key(&a.event.id));
+        assert!(resolver.identities().contains_key(&b.event.id));
+        assert_ne!(a.lineage, b.lineage);
     }
 
     #[test]
