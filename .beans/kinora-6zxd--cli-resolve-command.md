@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:15:19Z
+updated_at: 2026-04-18T16:22:38Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-5k13
@@ -51,15 +51,15 @@ Reconcile via one of:
 
 ## Acceptance
 
-- [ ] `resolve <id>` returns content of current head
-- [ ] `resolve <name>` does name lookup via metadata; warns on ambiguity
-- [ ] Fork detection traverses version DAG within identity
-- [ ] Single head → return content
-- [ ] Multiple heads → refuse with actionable report (heads listed, reconcile commands shown)
-- [ ] Branch-aware resolution: if HEAD's lineage descends from one head, prefer it
-- [ ] `--version HASH` returns specific prior version's content
-- [ ] `--all-heads` flag returns all heads without erroring
-- [ ] Unknown name/id yields clear error
+- [x] `resolve <id>` returns content of current head
+- [x] `resolve <name>` does name lookup via metadata; errors on ambiguity
+- [x] Fork detection traverses version DAG within identity
+- [x] Single head → return content
+- [x] Multiple heads → refuse with actionable report (heads listed, reconcile commands shown)
+- [x] Branch-aware resolution: head in HEAD lineage wins tiebreak
+- [x] `--version HASH` returns specific prior version's content
+- [x] `--all-heads` flag returns all heads without erroring
+- [x] Unknown name/id yields clear error
 
 ## Plan
 

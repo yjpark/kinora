@@ -56,4 +56,22 @@ pub enum Command {
         #[facet(args::named, args::short = 'm', default)]
         metadata: Vec<String>,
     },
+
+    /// Resolve a kino by name or id and print its current content to
+    /// stdout. Refuses forks unless `--version HASH` or `--all-heads` is
+    /// passed.
+    Resolve {
+        /// Either a 64-hex identity hash or a metadata `name`.
+        #[facet(args::positional)]
+        name_or_id: String,
+
+        /// Return the content at a specific version hash instead of the
+        /// current head.
+        #[facet(args::named, default)]
+        version: Option<String>,
+
+        /// On a fork, list all heads instead of erroring.
+        #[facet(args::named, default)]
+        all_heads: bool,
+    },
 }

@@ -1,10 +1,16 @@
+use std::io::Write;
 use std::process::ExitCode;
 
 use cli::{Cli, Command};
+use resolve::{
+    head_lineages, render_all_heads, render_fork_report, run_resolve, ResolveOutcome,
+    ResolveRunArgs,
+};
 use store::{run_store, StoreRunArgs};
 
 mod cli;
 mod common;
+mod resolve;
 mod store;
 
 fn main() -> ExitCode {
@@ -67,5 +73,46 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Resolve { name_or_id, version, all_heads } => {
+            let args = ResolveRunArgs { name_or_id: name_or_id.clone(), version, all_heads };
+            match run_resolve(&cwd, args) {
+                Ok(ResolveOutcome::Content(resolved)) => {
+                    let mut stdout = std::io::stdout().lock();
+                    if let Err(e) = stdout.write_all(&resolved.content) {
+                        eprintln!("error: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    ExitCode::SUCCESS
+                }
+                Ok(ResolveOutcome::AllHeads { id, heads }) => {
+                    let lineages = match kinora_resolver_from_cwd(&cwd) {
+                        Ok(r) => head_lineages(&r, &id, &heads),
+                        Err(_) => heads.iter().map(|_| "?".to_owned()).collect(),
+                    };
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = render_all_heads(&mut stdout, &id, &heads, &lineages);
+                    ExitCode::SUCCESS
+                }
+                Err(common::CliError::Resolve(kinora::resolve::ResolveError::MultipleHeads {
+                    id,
+                    heads,
+                    lineages,
+                })) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = render_fork_report(&mut stderr, &name_or_id, &id, &heads, &lineages);
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
     }
+}
+
+fn kinora_resolver_from_cwd(cwd: &std::path::Path) -> Result<kinora::resolve::Resolver, common::CliError> {
+    let repo_root = common::find_repo_root(cwd)?;
+    let kin_root = kinora::paths::kinora_root(&repo_root);
+    Ok(kinora::resolve::Resolver::load(&kin_root)?)
 }

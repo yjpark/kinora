@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use kinora::kino::StoreKinoError;
 use kinora::paths::KINORA_DIR;
+use kinora::resolve::ResolveError;
 
 #[derive(Debug)]
 pub enum CliError {
@@ -13,6 +14,7 @@ pub enum CliError {
     ConflictingDraftFlag,
     AuthorUnresolved,
     StoreKino(StoreKinoError),
+    Resolve(ResolveError),
 }
 
 impl fmt::Display for CliError {
@@ -37,6 +39,7 @@ impl fmt::Display for CliError {
                 "could not resolve author: pass --author NAME or set git `user.name`"
             ),
             CliError::StoreKino(e) => write!(f, "{e}"),
+            CliError::Resolve(e) => write!(f, "{e}"),
         }
     }
 }
@@ -52,6 +55,12 @@ impl From<io::Error> for CliError {
 impl From<StoreKinoError> for CliError {
     fn from(e: StoreKinoError) -> Self {
         CliError::StoreKino(e)
+    }
+}
+
+impl From<ResolveError> for CliError {
+    fn from(e: ResolveError) -> Self {
+        CliError::Resolve(e)
     }
 }
 
