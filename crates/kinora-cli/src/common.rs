@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kinora::kino::StoreKinoError;
+use kinora::kinograph::KinographError;
 use kinora::paths::KINORA_DIR;
 use kinora::resolve::ResolveError;
 
@@ -15,6 +16,7 @@ pub enum CliError {
     AuthorUnresolved,
     StoreKino(StoreKinoError),
     Resolve(ResolveError),
+    Kinograph(KinographError),
 }
 
 impl fmt::Display for CliError {
@@ -40,6 +42,7 @@ impl fmt::Display for CliError {
             ),
             CliError::StoreKino(e) => write!(f, "{e}"),
             CliError::Resolve(e) => write!(f, "{e}"),
+            CliError::Kinograph(e) => write!(f, "{e}"),
         }
     }
 }
@@ -61,6 +64,12 @@ impl From<StoreKinoError> for CliError {
 impl From<ResolveError> for CliError {
     fn from(e: ResolveError) -> Self {
         CliError::Resolve(e)
+    }
+}
+
+impl From<KinographError> for CliError {
+    fn from(e: KinographError) -> Self {
+        CliError::Kinograph(e)
     }
 }
 

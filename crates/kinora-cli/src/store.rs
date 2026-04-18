@@ -5,7 +5,9 @@ use std::path::Path;
 
 use kinora::author::resolve_author_from_git;
 use kinora::kino::{store_kino, StoreKinoParams, StoredKino};
+use kinora::kinograph::Kinograph;
 use kinora::paths::kinora_root;
+use kinora::resolve::Resolver;
 
 use crate::common::{find_repo_root, parse_metadata_flag, parse_parents, CliError};
 
@@ -27,7 +29,12 @@ pub fn run_store(cwd: &Path, args: StoreRunArgs) -> Result<StoredKino, CliError>
     let repo_root = find_repo_root(cwd)?;
     let kin_root = kinora_root(&repo_root);
 
-    let content = read_content(args.path.as_deref())?;
+    let raw_content = read_content(args.path.as_deref())?;
+    let content = if args.kind == "kinograph" {
+        normalize_kinograph_content(&kin_root, &raw_content)?
+    } else {
+        raw_content
+    };
 
     let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     if let Some(name) = args.name {
@@ -78,12 +85,23 @@ fn read_content(path: Option<&str>) -> Result<Vec<u8>, CliError> {
     }
 }
 
+/// Parse kinograph bytes, resolve name references to ids against the
+/// current ledger, and re-serialize. The on-disk blob is then
+/// authoritative by id even if the author wrote names.
+fn normalize_kinograph_content(kin_root: &Path, raw: &[u8]) -> Result<Vec<u8>, CliError> {
+    let kinograph = Kinograph::parse(raw)?;
+    let resolver = Resolver::load(kin_root)?;
+    let resolved = kinograph.resolve_names(&resolver)?;
+    Ok(resolved.to_styx()?.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kinora::init::init;
     use kinora::ledger::Ledger;
     use std::fs;
+    use std::str::FromStr;
     use tempfile::TempDir;
 
     fn repo() -> TempDir {
@@ -209,6 +227,74 @@ mod tests {
         args.metadata = vec!["  title  =Hello".into()];
         let stored = run_store(tmp.path(), args).unwrap();
         assert_eq!(stored.event.metadata.get("title").unwrap(), "Hello");
+    }
+
+    #[test]
+    fn kinograph_kind_rewrites_names_to_ids_before_store() {
+        let tmp = repo();
+        // Seed a kino the kinograph can reference by name.
+        let first_content = tmp.path().join("target.md");
+        fs::write(&first_content, b"target body").unwrap();
+        let mut first_args = base_args("markdown", first_content.to_str().unwrap());
+        first_args.name = Some("target".into());
+        let first = run_store(tmp.path(), first_args).unwrap();
+
+        // Kinograph content references by name only. Store should
+        // rewrite the id slot to the stored kino's identity hash.
+        let kg_path = tmp.path().join("doc.kinograph");
+        fs::write(&kg_path, b"entries ({id target})").unwrap();
+        let mut kg_args = base_args("kinograph", kg_path.to_str().unwrap());
+        kg_args.name = Some("doc".into());
+        let stored = run_store(tmp.path(), kg_args).unwrap();
+
+        let blob_path = kinora::paths::store_blob_path(
+            &kinora_root(tmp.path()),
+            &kinora::hash::Hash::from_str(&stored.event.hash).unwrap(),
+        );
+        let written = fs::read_to_string(blob_path).unwrap();
+        assert!(
+            written.contains(&first.event.id),
+            "stored kinograph should contain the resolved id, got: {written}"
+        );
+        assert!(written.contains("name target"), "should preserve name hint: {written}");
+    }
+
+    #[test]
+    fn kinograph_kind_errors_on_missing_name() {
+        let tmp = repo();
+        let kg_path = tmp.path().join("broken.kinograph");
+        fs::write(&kg_path, b"entries ({id nobody})").unwrap();
+        let mut args = base_args("kinograph", kg_path.to_str().unwrap());
+        args.name = Some("doc".into());
+        let err = run_store(tmp.path(), args).unwrap_err();
+        assert!(matches!(err, CliError::Kinograph(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn kinograph_kind_passes_through_hash_ids_unchanged() {
+        let tmp = repo();
+        let first_content = tmp.path().join("target.md");
+        fs::write(&first_content, b"x").unwrap();
+        let mut first_args = base_args("markdown", first_content.to_str().unwrap());
+        first_args.name = Some("tgt".into());
+        let first = run_store(tmp.path(), first_args).unwrap();
+
+        let kg_path = tmp.path().join("doc.kinograph");
+        fs::write(
+            &kg_path,
+            format!("entries ({{id {}}})", first.event.id).as_bytes(),
+        )
+        .unwrap();
+        let mut kg_args = base_args("kinograph", kg_path.to_str().unwrap());
+        kg_args.name = Some("doc".into());
+        let stored = run_store(tmp.path(), kg_args).unwrap();
+
+        let blob_path = kinora::paths::store_blob_path(
+            &kinora_root(tmp.path()),
+            &kinora::hash::Hash::from_str(&stored.event.hash).unwrap(),
+        );
+        let written = fs::read_to_string(blob_path).unwrap();
+        assert!(written.contains(&first.event.id));
     }
 
     #[test]
