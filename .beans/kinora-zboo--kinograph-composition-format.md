@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:27:33Z
+updated_at: 2026-04-18T16:37:13Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-5k13
@@ -20,17 +20,17 @@ RFC-0003 section: *Kinographs*. Design decisions in `kinora-fhw1`.
 ### Content format (styx)
 
 ```styx
-entries:
-  - id: b3aaa…
-  - id: b3bbb…
-    name: content-addressing
-    pin: b3xxx…
-    note: "The atomic concept — everything else builds on this."
-  - id: b3ccc…
+entries (
+  {id b3aaa…}
+  {id b3bbb…, name content-addressing, pin b3xxx…, note "The atomic concept — everything else builds on this."}
+  {id b3ccc…}
+)
 ```
 
+facet-styx only supports its inline form, not the YAML block shape. Fields the author omitted (no `name`, no `pin`, no `note`) can be left out of the braced record; on serialize they round-trip as empty strings (`name ""`).
+
 - `id` (required): authoritative kino-id reference
-- `name` (optional): non-authoritative hint; renderer warns if current name differs
+- `name` (optional): non-authoritative hint; preserved on round-trip (current-name-drift warning deferred to a follow-up)
 - `pin` (optional): freeze this reference to a specific content hash
 - `note` (optional): short commentary about this composition choice
 
@@ -58,14 +58,14 @@ entries:
 
 ## Acceptance
 
-- [ ] Parses styx kinograph with `entries[]`
-- [ ] Entry shape validated: `{id, name?, pin?, note?}`
-- [ ] Name→id resolution on store (warn on ambiguous or missing)
-- [ ] Pinned refs resolve to specific content hash
-- [ ] Raw file remains human-readable for emergency recovery
-- [ ] Updates append new ledger events (version DAG preserved)
-- [ ] Renderer concatenates resolved entries in order
-- [ ] Per-entry notes emitted as blockquote above entry content
+- [x] Parses styx kinograph with `entries[]`
+- [x] Entry shape validated: `{id, name?, pin?, note?}`
+- [x] Name→id resolution on store (errors on ambiguous or missing — matches resolve-command semantics)
+- [x] Pinned refs resolve to specific content hash (event.hash = BLAKE3(content), so the event-hash match in resolve_at_version is the content hash)
+- [x] Raw file remains human-readable (plain styx text, no binary)
+- [x] Updates append new ledger events (`store_kino` path is kind-agnostic; kinographs use the same version DAG as any other kino)
+- [x] Renderer concatenates resolved entries in order
+- [x] Per-entry notes emitted as blockquote above entry content
 
 ## Plan
 

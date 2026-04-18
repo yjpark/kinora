@@ -260,6 +260,24 @@ mod tests {
     }
 
     #[test]
+    fn kinograph_kind_errors_on_ambiguous_name() {
+        let tmp = repo();
+        for (body, name) in [(b"a" as &[u8], "dup"), (b"b", "dup")] {
+            let src = tmp.path().join(format!("{name}-{}.md", body[0] as char));
+            fs::write(&src, body).unwrap();
+            let mut a = base_args("markdown", src.to_str().unwrap());
+            a.name = Some(name.into());
+            run_store(tmp.path(), a).unwrap();
+        }
+        let kg_path = tmp.path().join("doc.kinograph");
+        fs::write(&kg_path, b"entries ({id dup})").unwrap();
+        let mut args = base_args("kinograph", kg_path.to_str().unwrap());
+        args.name = Some("doc".into());
+        let err = run_store(tmp.path(), args).unwrap_err();
+        assert!(matches!(err, CliError::Kinograph(_)), "got: {err:?}");
+    }
+
+    #[test]
     fn kinograph_kind_errors_on_missing_name() {
         let tmp = repo();
         let kg_path = tmp.path().join("broken.kinograph");

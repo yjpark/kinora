@@ -458,4 +458,61 @@ mod tests {
         assert_eq!(e.pin_opt(), None);
         assert_eq!(e.note_opt(), None);
     }
+
+    #[test]
+    fn notes_with_styx_reserved_chars_roundtrip_via_quoting() {
+        let id = "a".repeat(64);
+        for note in [
+            "see {here}",
+            "\"quoted\"",
+            "has @ symbol",
+            "line one\nline two",
+            "commas, yes, commas",
+        ] {
+            let k = Kinograph {
+                entries: vec![Entry {
+                    id: id.clone(),
+                    name: String::new(),
+                    pin: String::new(),
+                    note: note.to_string(),
+                }],
+            };
+            let s = k.to_styx().unwrap();
+            let parsed = Kinograph::parse_str(&s).expect(note);
+            assert_eq!(parsed, k, "roundtrip broke for note={note:?}");
+        }
+    }
+
+    #[test]
+    fn empty_entries_parses_and_renders() {
+        let input = "entries ()";
+        let k = Kinograph::parse_str(input).unwrap();
+        assert!(k.entries.is_empty());
+
+        let (_t, root) = repo();
+        let resolver = Resolver::load(&root).unwrap();
+        let rendered = k.render(&resolver).unwrap();
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn render_errors_when_pin_does_not_match_any_version() {
+        let (_t, root) = repo();
+        let stored = store_kino(&root, store_params(b"x", "doc")).unwrap();
+        let bogus = "b".repeat(64);
+        let k = Kinograph {
+            entries: vec![Entry {
+                id: stored.event.id,
+                name: String::new(),
+                pin: bogus,
+                note: String::new(),
+            }],
+        };
+        let resolver = Resolver::load(&root).unwrap();
+        let err = k.render(&resolver).unwrap_err();
+        assert!(matches!(
+            err,
+            KinographError::Resolve(ResolveError::VersionNotFound { .. })
+        ));
+    }
 }
