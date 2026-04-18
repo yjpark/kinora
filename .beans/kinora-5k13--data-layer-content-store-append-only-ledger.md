@@ -1,11 +1,11 @@
 ---
 # kinora-5k13
 title: 'Data layer: content store + append-only ledger'
-status: todo
+status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T15:23:02Z
+updated_at: 2026-04-18T15:24:34Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-fhw1
@@ -117,3 +117,29 @@ Bootstraps `.kinora/` in a repo:
 - [ ] Falls back to `git remote get-url origin` via `gix`
 - [ ] Errors clearly if no remote and no flag given
 - [ ] Refuses to overwrite an existing `.kinora/`
+
+
+## Plan
+
+Module layout under `crates/kinora/src/`:
+
+- `hash.rs` — `Hash` newtype (64-char lowercase hex), BLAKE3 helpers, hex parse/display
+- `paths.rs` — path builders for store (`store/aa/aabb…`), ledger (`ledger/<shorthash>.jsonl`), HEAD, config
+- `value.rs` — `Value` enum + `Metadata` alias (nested JSON-like values for metadata fields)
+- `config.rs` — `Config` struct, `.kinora/config.styx` parse (only `repo-url` in MVP)
+- `namespace.rs` — bare vs `prefix::name` validation (reserved bare set)
+- `store.rs` — `ContentStore` (write + read + dedupe + verify-on-read)
+- `ledger.rs` — `Event` envelope + `Ledger` (append + scan, lineage file resolution)
+- `init.rs` — `kinora init` flow (refuse-if-exists, repo-url resolution, layout creation)
+
+Commit plan (TDD per module):
+
+1. `hash` + `paths` (foundational primitives)
+2. `value` + `namespace` (metadata substrate + validation)
+3. `config` (depends on value)
+4. `store` (depends on hash + paths)
+5. `ledger` (depends on all of above)
+6. `init` (depends on config + paths)
+7. Subagent review + any fixes
+
+Each commit: tests first, then impl, then bean checkbox updates. Zero warnings at every step (check `.bacon-claude-diagnostics` before committing).
