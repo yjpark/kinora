@@ -1,11 +1,11 @@
 ---
 # kinora-zboo
 title: Kinograph composition format
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:37:13Z
+updated_at: 2026-04-18T16:39:56Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-5k13
@@ -97,3 +97,28 @@ Commit plan:
 2. name resolution + render library primitive
 3. CLI store-time rewrite
 4. review fixes if any
+
+
+## Summary of Changes
+
+Landed kinograph composition as a kind alongside markdown/text/binary.
+
+**Library (`crates/kinora/src/kinograph.rs`):**
+- `Entry { id, name, pin, note }` as facet-styx records. All optional-feeling fields are `String` with `#[facet(default)]` and an empty-string-means-absent convention, because facet-styx can't round-trip `Option<String>` (it serializes `None` as `@` but rejects `@` on parse). `name_opt() / pin_opt() / note_opt()` expose Option-flavored access.
+- `Kinograph::{parse, parse_str, to_styx}` round-trip through facet-styx's inline form.
+- `resolve_names(&Resolver)`: for each entry whose `id` is not a valid 64-hex hash, resolve via `name` (if set) or via the id slot treated as a name. Fills in the empty `name` field. Errors on ambiguous or missing names.
+- `render(&Resolver)`: walks entries in order; fetches content by pin (via `resolve_at_version`) or head (via `resolve_by_id`); emits any `note` as `> `-prefixed lines; joins with blank-line separators.
+- `KinographError`: Parse, Serialize, InvalidEntry, Resolve, Utf8, AmbiguousName, NameNotFound.
+
+**CLI (`crates/kinora-cli/src/store.rs`):**
+- When `kind == "kinograph"`, the stored bytes are the re-serialized kinograph after `resolve_names`. Authors may write names; the on-disk blob is authoritative by id with name hints preserved.
+- Error surface extended: `CliError::{Resolve, Kinograph}` + Display/From.
+
+**Format decisions:**
+- facet-styx only accepts its inline form. The bean spec's styx example uses `entries ({id ..., name ..., pin ..., note ...})`.
+- Pin semantics align with `event.hash = BLAKE3(content)` in `store_kino` — the event-hash that `resolve_at_version` matches IS the content hash. No separate content-hash field needed.
+- Name-hint "current-name-drift" warning deferred — the format preserves the hint so a future lint can compare it against current-name without re-authoring.
+
+**Test coverage:**
+- 10 library tests (parse/validate/round-trip, name resolution happy/ambiguous/missing paths, render ordering + notes + pin fetch + pin mismatch, reserved-char round-trip, empty-entries edge case).
+- 4 CLI tests (name→id rewrite on store; ambiguous name error; missing name error; hash ids pass through unchanged).
