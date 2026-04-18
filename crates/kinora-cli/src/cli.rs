@@ -57,6 +57,16 @@ pub enum Command {
         metadata: Vec<String>,
     },
 
+    /// Render the repo's kinos and kinographs into an mdbook project under
+    /// `~/.cache/kinora/<shorthash>-<name>/` (or `$XDG_CACHE_HOME` if set).
+    Render {
+        /// Override the cache root. Defaults to
+        /// `$XDG_CACHE_HOME/kinora/<shorthash>-<name>/` (falling back to
+        /// `$HOME/.cache/kinora/<shorthash>-<name>/`).
+        #[facet(args::named, default)]
+        cache_dir: Option<String>,
+    },
+
     /// Resolve a kino by name or id and print its current content to
     /// stdout. Refuses forks unless `--version HASH` or `--all-heads` is
     /// passed.

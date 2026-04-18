@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:48:55Z
+updated_at: 2026-04-18T16:54:14Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-zboo
@@ -61,16 +61,16 @@ RFC-0003 sections: *Rendering*, *Minimal CLI → render*. Design decisions in `k
 
 ## Acceptance
 
-- [ ] Reads `.kinora/config.styx → repo-url`; errors if absent
+- [x] Reads `.kinora/config.styx → repo-url`; errors if absent
 - [x] Derives cache path correctly per normalization rules
-- [ ] Renders single current branch end-to-end
-- [ ] Extends to all local branches and worktrees (union of ledger files per branch)
+- [x] Renders single current branch end-to-end
+- [~] Extends to all local branches and worktrees (union of ledger files per branch) — **deferred** to kinora-ohwb
 - [x] Kind dispatch: `markdown` + `kinograph` in MVP
 - [x] `kino://<id>/` URLs resolved to cross-links between rendered pages
 - [x] SUMMARY.md organized by branch
 - [x] Source markers include originating branch
 - [x] Full rebuild on every run
-- [ ] Output is viewable via `mdbook serve` from cache path
+- [x] Output is viewable via `mdbook serve` from cache path (verified via `mdbook build` smoke test — HTML output generated cleanly)
 
 
 ## Plan

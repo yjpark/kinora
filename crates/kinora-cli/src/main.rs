@@ -2,6 +2,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use cli::{Cli, Command};
+use render::{run_render, RenderRunArgs};
 use resolve::{
     head_lineages, render_all_heads, render_fork_report, run_resolve, ResolveOutcome,
     ResolveRunArgs,
@@ -10,6 +11,7 @@ use store::{run_store, StoreRunArgs};
 
 mod cli;
 mod common;
+mod render;
 mod resolve;
 mod store;
 
@@ -64,6 +66,23 @@ fn main() -> ExitCode {
                         stored.event.hash,
                         stored.lineage,
                         if stored.was_new_lineage { " (new lineage)" } else { "" },
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Render { cache_dir } => {
+            let args = RenderRunArgs { cache_dir };
+            match run_render(&cwd, args) {
+                Ok(report) => {
+                    println!(
+                        "rendered {} pages into {}",
+                        report.page_count,
+                        report.cache_path.display(),
                     );
                     ExitCode::SUCCESS
                 }

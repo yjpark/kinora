@@ -2,9 +2,12 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use kinora::config::ConfigError;
 use kinora::kino::StoreKinoError;
 use kinora::kinograph::KinographError;
+use kinora::ledger::LedgerError;
 use kinora::paths::KINORA_DIR;
+use kinora::render::RenderError;
 use kinora::resolve::ResolveError;
 
 #[derive(Debug)]
@@ -14,9 +17,13 @@ pub enum CliError {
     InvalidMetadataFlag { got: String },
     ConflictingDraftFlag,
     AuthorUnresolved,
+    CacheHomeUnresolved,
+    Config(ConfigError),
     StoreKino(StoreKinoError),
     Resolve(ResolveError),
     Kinograph(KinographError),
+    Render(RenderError),
+    Ledger(LedgerError),
 }
 
 impl fmt::Display for CliError {
@@ -40,9 +47,16 @@ impl fmt::Display for CliError {
                 f,
                 "could not resolve author: pass --author NAME or set git `user.name`"
             ),
+            CliError::CacheHomeUnresolved => write!(
+                f,
+                "could not resolve cache root: set $XDG_CACHE_HOME or $HOME, or pass --cache-dir"
+            ),
+            CliError::Config(e) => write!(f, "{e}"),
             CliError::StoreKino(e) => write!(f, "{e}"),
             CliError::Resolve(e) => write!(f, "{e}"),
             CliError::Kinograph(e) => write!(f, "{e}"),
+            CliError::Render(e) => write!(f, "{e}"),
+            CliError::Ledger(e) => write!(f, "{e}"),
         }
     }
 }
@@ -70,6 +84,24 @@ impl From<ResolveError> for CliError {
 impl From<KinographError> for CliError {
     fn from(e: KinographError) -> Self {
         CliError::Kinograph(e)
+    }
+}
+
+impl From<ConfigError> for CliError {
+    fn from(e: ConfigError) -> Self {
+        CliError::Config(e)
+    }
+}
+
+impl From<RenderError> for CliError {
+    fn from(e: RenderError) -> Self {
+        CliError::Render(e)
+    }
+}
+
+impl From<LedgerError> for CliError {
+    fn from(e: LedgerError) -> Self {
+        CliError::Ledger(e)
     }
 }
 
