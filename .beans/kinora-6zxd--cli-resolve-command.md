@@ -1,11 +1,11 @@
 ---
 # kinora-6zxd
 title: 'CLI: resolve command'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T16:22:38Z
+updated_at: 2026-04-18T16:25:58Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-5k13
@@ -89,3 +89,28 @@ Commit plan:
 1. resolve library + tests
 2. resolve CLI + tests
 3. review fixes if any
+
+## Summary of Changes
+
+**Library** (`crates/kinora/src/resolve.rs`):
+- `Identity` groups all events of a single id across every lineage file; heads are precomputed as events whose hash is not referenced as a parent by any other same-identity event.
+- `Resolver::load` loads all identities from `Ledger::read_all_lineages`.
+- `resolve_by_id`, `resolve_by_name` (scans `metadata.name` on heads so renames take effect), `resolve_at_version`.
+- Branch-aware tiebreaker: if multiple heads but exactly one lives in the HEAD lineage, that one wins; otherwise `MultipleHeads` carries heads + lineage shorthashes.
+- Content is re-verified via the hash-checking `ContentStore::read`.
+
+**CLI** (`crates/kinora-cli/src/resolve.rs`):
+- `run_resolve(cwd, args)` returns a `ResolveOutcome`: content or all-heads listing.
+- `--version HASH` resolves the identity first (by hash or by name), then reads the requested prior version.
+- `--all-heads` turns `MultipleHeads` into a clean listing instead of erroring.
+- Fork report matches the bean spec: `kino `<name>` (id: shorthash…) has N heads: … Reconcile via one of: merge / linearize / keep-both / detach`.
+- Output contract: content → stdout, fork report → stderr + non-zero exit.
+
+**Design notes**:
+- Name lookup only matches the current head's metadata (so renames take effect; the old name errors with NotFound).
+- `--version` by name resolves the identity from the current head first, then looks up the version by hash — consistent with renames.
+- Uses `SHORTHASH_LEN` constant everywhere.
+
+**Tests**: 135 total pass, zero warnings. Library tests cover birth resolution, unknown id, linear latest-version, fork without HEAD, branch-aware tiebreak with HEAD, multi-lineage grouping, name unique/ambiguous/missing, version-at-hash, rename visibility. CLI tests cover run_resolve for all 4 arg combinations, fork + all-heads, fork report and all-heads rendering, and not-in-kinora-repo.
+
+Commits: ffad623 (library), 21116bb (CLI), 708f40f (review fixes).
