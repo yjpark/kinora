@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use crate::event::Event;
 use crate::hash::{Hash, HashParseError};
 use crate::namespace::{self, NamespaceError};
-use crate::store::ContentStore;
+use crate::store::{ContentStore, StoreError};
 
 #[derive(Debug)]
 pub enum ValidationError {
@@ -13,6 +14,11 @@ pub enum ValidationError {
     BirthEventIdMustEqualHash,
     VersionEventIdMustDiffer,
     ParentNotInStore { hash: Hash },
+    ParentCorrupted { hash: Hash, err: StoreError },
+    SelfParenting { hash: Hash },
+    DuplicateParent { hash: Hash },
+    EventHashNotInStore { hash: Hash },
+    EventHashCorrupted { hash: Hash, err: StoreError },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -33,6 +39,21 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::ParentNotInStore { hash } => {
                 write!(f, "parent hash not present in store: {hash}")
+            }
+            ValidationError::ParentCorrupted { hash, err } => {
+                write!(f, "parent content corrupted for {hash}: {err}")
+            }
+            ValidationError::SelfParenting { hash } => {
+                write!(f, "event cannot list its own hash as a parent: {hash}")
+            }
+            ValidationError::DuplicateParent { hash } => {
+                write!(f, "duplicate parent hash: {hash}")
+            }
+            ValidationError::EventHashNotInStore { hash } => {
+                write!(f, "event hash not present in store: {hash}")
+            }
+            ValidationError::EventHashCorrupted { hash, err } => {
+                write!(f, "event content corrupted for {hash}: {err}")
             }
         }
     }
@@ -57,9 +78,16 @@ pub fn validate_event_shape(event: &Event) -> Result<(), ValidationError> {
         namespace::validate_metadata_key(key)?;
     }
     parse_hash_field("id", &event.id)?;
-    parse_hash_field("hash", &event.hash)?;
+    let self_hash = parse_hash_field("hash", &event.hash)?;
+    let mut seen: HashSet<Hash> = HashSet::new();
     for p in &event.parents {
-        parse_hash_field("parents[]", p)?;
+        let ph = parse_hash_field("parents[]", p)?;
+        if ph == self_hash {
+            return Err(ValidationError::SelfParenting { hash: ph });
+        }
+        if !seen.insert(ph.clone()) {
+            return Err(ValidationError::DuplicateParent { hash: ph });
+        }
     }
     if event.parents.is_empty() {
         if event.id != event.hash {
@@ -71,18 +99,44 @@ pub fn validate_event_shape(event: &Event) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Verify each parent hash exists in the content store.
+/// Verify each parent hash resolves to intact content in the store.
+///
+/// Uses `store.read()` so the stored bytes are re-hashed — catches
+/// corruption or tampering, not just file presence.
 pub fn validate_parents_exist(
     store: &ContentStore,
     event: &Event,
 ) -> Result<(), ValidationError> {
     for p in &event.parents {
         let h = parse_hash_field("parents[]", p)?;
-        if !store.exists(&h) {
-            return Err(ValidationError::ParentNotInStore { hash: h });
+        match store.read(&h) {
+            Ok(_) => {}
+            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ValidationError::ParentNotInStore { hash: h });
+            }
+            Err(err) => return Err(ValidationError::ParentCorrupted { hash: h, err }),
         }
     }
     Ok(())
+}
+
+/// Verify that `event.hash` resolves to intact content in the store.
+///
+/// Complements `validate_parents_exist` by binding the event to its own
+/// stored bytes — without this, an event envelope could reference a hash
+/// whose content was never written.
+pub fn validate_event_hash_in_store(
+    store: &ContentStore,
+    event: &Event,
+) -> Result<(), ValidationError> {
+    let h = parse_hash_field("hash", &event.hash)?;
+    match store.read(&h) {
+        Ok(_) => Ok(()),
+        Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(ValidationError::EventHashNotInStore { hash: h })
+        }
+        Err(err) => Err(ValidationError::EventHashCorrupted { hash: h, err }),
+    }
 }
 
 fn parse_hash_field(field: &'static str, value: &str) -> Result<Hash, ValidationError> {
@@ -164,7 +218,7 @@ mod tests {
     #[test]
     fn birth_with_parents_rejected() {
         let mut e = birth("markdown");
-        e.parents.push(e.hash.clone());
+        e.parents.push(Hash::of_content(b"prior").as_hex().into());
         let err = validate_event_shape(&e).unwrap_err();
         assert!(matches!(err, ValidationError::VersionEventIdMustDiffer));
     }
@@ -180,6 +234,7 @@ mod tests {
     #[test]
     fn version_with_id_eq_hash_rejected() {
         let mut e = version_from(&birth("markdown"));
+        e.parents = vec![Hash::of_content(b"other-parent").as_hex().into()];
         e.hash = e.id.clone();
         let err = validate_event_shape(&e).unwrap_err();
         assert!(matches!(err, ValidationError::VersionEventIdMustDiffer));
@@ -208,5 +263,66 @@ mod tests {
         e.parents.push(Hash::of_content(b"missing").as_hex().into());
         let err = validate_parents_exist(&store, &e).unwrap_err();
         assert!(matches!(err, ValidationError::ParentNotInStore { .. }));
+    }
+
+    #[test]
+    fn self_parenting_rejected() {
+        let mut e = version_from(&birth("markdown"));
+        e.parents = vec![e.hash.clone()];
+        let err = validate_event_shape(&e).unwrap_err();
+        assert!(matches!(err, ValidationError::SelfParenting { .. }));
+    }
+
+    #[test]
+    fn duplicate_parents_rejected() {
+        let mut e = version_from(&birth("markdown"));
+        let p = Hash::of_content(b"prior").as_hex().into();
+        e.parents = vec![p, Hash::of_content(b"prior").as_hex().into()];
+        let err = validate_event_shape(&e).unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicateParent { .. }));
+    }
+
+    #[test]
+    fn parent_corruption_detected() {
+        use crate::paths::store_blob_path;
+        let tmp = TempDir::new().unwrap();
+        let store = ContentStore::new(tmp.path());
+        store.ensure_layout().unwrap();
+
+        let stored_hash = store.write(b"prior").unwrap();
+        std::fs::write(store_blob_path(store.root(), &stored_hash), b"tampered").unwrap();
+
+        let mut e = version_from(&birth("markdown"));
+        e.parents = vec![stored_hash.as_hex().into()];
+        let err = validate_parents_exist(&store, &e).unwrap_err();
+        assert!(matches!(err, ValidationError::ParentCorrupted { .. }));
+    }
+
+    #[test]
+    fn event_hash_in_store_checks_presence_and_integrity() {
+        use crate::paths::store_blob_path;
+        let tmp = TempDir::new().unwrap();
+        let store = ContentStore::new(tmp.path());
+        store.ensure_layout().unwrap();
+
+        let content = b"event-content";
+        let h = store.write(content).unwrap();
+        let mut e = birth("markdown");
+        e.id = h.as_hex().into();
+        e.hash = h.as_hex().into();
+        assert!(validate_event_hash_in_store(&store, &e).is_ok());
+
+        // missing blob
+        let mut missing = e.clone();
+        let other = Hash::of_content(b"not-written");
+        missing.id = other.as_hex().into();
+        missing.hash = other.as_hex().into();
+        let err = validate_event_hash_in_store(&store, &missing).unwrap_err();
+        assert!(matches!(err, ValidationError::EventHashNotInStore { .. }));
+
+        // corrupted blob
+        std::fs::write(store_blob_path(store.root(), &h), b"tampered").unwrap();
+        let err = validate_event_hash_in_store(&store, &e).unwrap_err();
+        assert!(matches!(err, ValidationError::EventHashCorrupted { .. }));
     }
 }

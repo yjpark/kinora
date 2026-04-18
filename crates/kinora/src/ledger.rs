@@ -12,6 +12,8 @@ pub enum LedgerError {
     Io(io::Error),
     Event(EventError),
     NoHead,
+    LineageAlreadyExists { shorthash: String },
+    LineageMissing { shorthash: String },
 }
 
 impl std::fmt::Display for LedgerError {
@@ -20,6 +22,14 @@ impl std::fmt::Display for LedgerError {
             LedgerError::Io(e) => write!(f, "ledger io error: {e}"),
             LedgerError::Event(e) => write!(f, "ledger event error: {e}"),
             LedgerError::NoHead => write!(f, "no HEAD: call mint_and_append for the first event"),
+            LedgerError::LineageAlreadyExists { shorthash } => write!(
+                f,
+                "lineage file `{shorthash}.jsonl` already exists; refusing to clobber append-only file"
+            ),
+            LedgerError::LineageMissing { shorthash } => write!(
+                f,
+                "HEAD points to lineage `{shorthash}.jsonl` but file is missing"
+            ),
         }
     }
 }
@@ -66,36 +76,50 @@ impl Ledger {
         }
     }
 
-    /// Write `.kinora/HEAD` with the given lineage shorthash.
+    /// Atomically write `.kinora/HEAD` with the given lineage shorthash.
     pub fn set_head(&self, shorthash: &str) -> Result<(), LedgerError> {
         let path = head_path(&self.kinora_root);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, shorthash)?;
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, shorthash)?;
+        fs::rename(&tmp, &path)?;
         Ok(())
     }
 
     /// Mint a new lineage file from `event`, set HEAD to its shorthash, and
-    /// return the shorthash.
+    /// return the shorthash. Fails with `LineageAlreadyExists` if the target
+    /// file is already present — preserves the append-only invariant.
     pub fn mint_and_append(&self, event: &Event) -> Result<String, LedgerError> {
         self.ensure_layout()?;
         let line = event.to_json_line()?;
         let shorthash =
             Hash::of_content(line.as_bytes()).shorthash().to_owned();
         let file = ledger_file_path(&self.kinora_root, &shorthash);
-        write_line(&file, &line)?;
+        write_line_exclusive(&file, &line).map_err(|e| match e.kind() {
+            io::ErrorKind::AlreadyExists => LedgerError::LineageAlreadyExists {
+                shorthash: shorthash.clone(),
+            },
+            _ => LedgerError::Io(e),
+        })?;
         self.set_head(&shorthash)?;
         Ok(shorthash)
     }
 
     /// Append `event` to the current HEAD lineage file. Returns the shorthash
-    /// on success, or `LedgerError::NoHead` if HEAD is not set.
+    /// on success. Errors: `NoHead` if HEAD is unset; `LineageMissing` if HEAD
+    /// points to a file that doesn't exist.
     pub fn append_to_head(&self, event: &Event) -> Result<String, LedgerError> {
         let shorthash = self.current_lineage()?.ok_or(LedgerError::NoHead)?;
         let file = ledger_file_path(&self.kinora_root, &shorthash);
         let line = event.to_json_line()?;
-        append_line(&file, &line)?;
+        append_line_existing(&file, &line).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => LedgerError::LineageMissing {
+                shorthash: shorthash.clone(),
+            },
+            _ => LedgerError::Io(e),
+        })?;
         Ok(shorthash)
     }
 
@@ -129,21 +153,18 @@ impl Ledger {
     }
 }
 
-fn write_line(path: &Path, line: &str) -> io::Result<()> {
+fn write_line_exclusive(path: &Path, line: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut f = fs::OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+    let mut f = fs::OpenOptions::new().create_new(true).write(true).open(path)?;
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")?;
     Ok(())
 }
 
-fn append_line(path: &Path, line: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
+fn append_line_existing(path: &Path, line: &str) -> io::Result<()> {
+    let mut f = fs::OpenOptions::new().append(true).open(path)?;
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")?;
     Ok(())
@@ -253,7 +274,7 @@ mod tests {
             .shorthash()
             .to_owned();
         let other = ledger_file_path(l.root(), &sh_b);
-        write_line(&other, &b.to_json_line().unwrap()).unwrap();
+        write_line_exclusive(&other, &b.to_json_line().unwrap()).unwrap();
 
         let all = l.read_all_lineages().unwrap();
         assert_eq!(all.len(), 2);
@@ -279,5 +300,33 @@ mod tests {
         let expected = Hash::of_content(line.as_bytes()).shorthash().to_owned();
         let sh = l.mint_and_append(&a).unwrap();
         assert_eq!(sh, expected);
+    }
+
+    #[test]
+    fn mint_refuses_when_lineage_file_already_exists() {
+        let (_t, l) = ledger();
+        let a = event("a", "2026-04-18T09:00:00Z");
+        l.mint_and_append(&a).unwrap();
+        let err = l.mint_and_append(&a).unwrap_err();
+        assert!(matches!(err, LedgerError::LineageAlreadyExists { .. }));
+    }
+
+    #[test]
+    fn append_to_head_errors_when_lineage_file_missing() {
+        let (_t, l) = ledger();
+        let a = event("a", "2026-04-18T09:00:00Z");
+        let sh = l.mint_and_append(&a).unwrap();
+        fs::remove_file(ledger_file_path(l.root(), &sh)).unwrap();
+        let b = event("b", "2026-04-18T09:01:00Z");
+        let err = l.append_to_head(&b).unwrap_err();
+        assert!(matches!(err, LedgerError::LineageMissing { .. }));
+    }
+
+    #[test]
+    fn set_head_overwrites_previous_value() {
+        let (_t, l) = ledger();
+        l.set_head("aaaaaaaa").unwrap();
+        l.set_head("bbbbbbbb").unwrap();
+        assert_eq!(l.current_lineage().unwrap().as_deref(), Some("bbbbbbbb"));
     }
 }

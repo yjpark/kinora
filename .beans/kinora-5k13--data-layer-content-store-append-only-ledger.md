@@ -1,11 +1,11 @@
 ---
 # kinora-5k13
 title: 'Data layer: content store + append-only ledger'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-18T09:16:59Z
-updated_at: 2026-04-18T15:37:45Z
+updated_at: 2026-04-18T15:45:42Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-fhw1
@@ -143,3 +143,20 @@ Commit plan (TDD per module):
 7. Subagent review + any fixes
 
 Each commit: tests first, then impl, then bean checkbox updates. Zero warnings at every step (check `.bacon-claude-diagnostics` before committing).
+
+## Summary of Changes
+
+Built the full data layer that backs the kinora CLI, plus library-level `kinora init`:
+
+- **`hash`** — `Hash` newtype around 64-char lowercase hex with BLAKE3 helpers, `shorthash()`, `shard()`, and strict FromStr.
+- **`paths`** — builders for the on-disk layout (`.kinora/`, config, HEAD, sharded store, per-lineage JSONL).
+- **`value`** — `Value` enum + `Metadata` alias with null-removes-field merge semantics (reserved for post-bootstrap typed metadata).
+- **`namespace`** — reserved bare kinds/keys plus `prefix::name` extension rule.
+- **`config`** — `Config` serialized via facet-styx; MVP field is `repo-url`.
+- **`store`** — `ContentStore::write` (atomic tmp-rename, idempotent, sharded) and `read` (re-hashes content, detects corruption).
+- **`event`** — facet-derived envelope (`kind, id, hash, parents[], ts, author, provenance, metadata`) with JSONL round-trip and `is_birth()`.
+- **`ledger`** — `Ledger` with `mint_and_append`, `append_to_head`, and `.kinora/HEAD` tracking. Append-only invariant enforced at the OS level: mint uses `create_new(true)` (→ `LineageAlreadyExists`); append uses `append` only with no `create` (→ `LineageMissing`); `set_head` writes atomically via tmp-rename.
+- **`validate`** — shape validation (namespace, hash parseability, birth/version id/hash rules, self-parenting + duplicate parent rejection) and content-backed checks that use `store.read()` so corruption surfaces (`ParentCorrupted`, `EventHashCorrupted`) alongside plain absence.
+- **`init`** — `init()` refuses an existing `.kinora/`, `resolve_repo_url_from_git()` uses `gix`, `init_with_git_fallback()` prefers `--repo-url` else reads `origin`.
+
+Committed across 7 focused commits (hash+paths, value+namespace, config, store, event+ledger+validate, init, review fixes), each with tests first and zero compiler warnings. 82 unit tests cover round-trips, append-only invariants, metadata merge, namespace rules, validation edges, and git-origin resolution.
