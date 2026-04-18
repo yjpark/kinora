@@ -4,6 +4,7 @@ pub mod event;
 pub mod hash;
 pub mod init;
 pub mod kino;
+pub mod kinograph;
 pub mod ledger;
 pub mod namespace;
 pub mod paths;
