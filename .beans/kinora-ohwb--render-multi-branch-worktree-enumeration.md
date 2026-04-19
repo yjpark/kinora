@@ -1,11 +1,11 @@
 ---
 # kinora-ohwb
 title: 'Render: multi-branch + worktree enumeration'
-status: draft
+status: todo
 type: feature
 priority: normal
 created_at: 2026-04-18T16:42:01Z
-updated_at: 2026-04-18T16:42:14Z
+updated_at: 2026-04-19T17:06:05Z
 parent: kinora-w7w0
 blocked_by:
     - kinora-9nom
@@ -41,3 +41,9 @@ Split out of kinora-9nom. The MVP render delivered by kinora-9nom targets the cu
 Still draft — design needs confirmation:
 - Should identical kinos across branches (same `id`) dedupe, or render once per branch? Current plan: once per branch with a source marker (simpler; matches git's branch isolation).
 - How should `kino://<id>/` cross-links resolve when the target kino lives on a different branch? Options: (a) pick current-branch target preferentially with fallback to any branch; (b) always link to the current branch's section and warn if missing; (c) emit a disambiguated URL per branch.
+
+## Resolved: design questions
+
+**Q1 — dedupe vs per-branch rendering:** render per-branch with source marker. One page per (branch, kino) pair; same-id kinos on multiple branches get duplicated pages. Matches git's branch-as-independent-timeline model; content-addressed kinos can legitimately have different versions on different branches, so dedupe-to-one would be lossy. Duplication cost is negligible.
+
+**Q2 — cross-branch `kino://<id>/` resolution:** within-branch only. Resolve against the current branch's Resolver. If the target doesn't exist on the current branch, emit the reference as text with a visible warning marker — no dead link, no cross-branch fallback. Users who want working links merge the target branch. Rationale: cross-branch references are an anti-pattern git already handles via merge; don't build machinery for a case with a built-in solution.
