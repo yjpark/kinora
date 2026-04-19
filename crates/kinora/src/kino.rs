@@ -7,66 +7,22 @@ use crate::ledger::{Ledger, LedgerError};
 use crate::store::{ContentStore, StoreError};
 use crate::validate::{self, ValidationError};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreKinoError {
-    Io(io::Error),
-    Store(StoreError),
-    Ledger(LedgerError),
-    Event(EventError),
-    Validation(ValidationError),
+    #[error("store-kino io error: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Event(#[from] EventError),
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+    #[error(".kinora/ not found at {}; run `kinora init` first", .path.display())]
     KinoraMissing { path: PathBuf },
+    #[error("--parents requires --id: cannot infer identity from parents without walking the ledger DAG")]
     ParentsWithoutId,
-}
-
-impl std::fmt::Display for StoreKinoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StoreKinoError::Io(e) => write!(f, "store-kino io error: {e}"),
-            StoreKinoError::Store(e) => write!(f, "{e}"),
-            StoreKinoError::Ledger(e) => write!(f, "{e}"),
-            StoreKinoError::Event(e) => write!(f, "{e}"),
-            StoreKinoError::Validation(e) => write!(f, "{e}"),
-            StoreKinoError::KinoraMissing { path } => {
-                write!(f, ".kinora/ not found at {}; run `kinora init` first", path.display())
-            }
-            StoreKinoError::ParentsWithoutId => write!(
-                f,
-                "--parents requires --id: cannot infer identity from parents without walking the ledger DAG"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StoreKinoError {}
-
-impl From<io::Error> for StoreKinoError {
-    fn from(e: io::Error) -> Self {
-        StoreKinoError::Io(e)
-    }
-}
-
-impl From<StoreError> for StoreKinoError {
-    fn from(e: StoreError) -> Self {
-        StoreKinoError::Store(e)
-    }
-}
-
-impl From<LedgerError> for StoreKinoError {
-    fn from(e: LedgerError) -> Self {
-        StoreKinoError::Ledger(e)
-    }
-}
-
-impl From<EventError> for StoreKinoError {
-    fn from(e: EventError) -> Self {
-        StoreKinoError::Event(e)
-    }
-}
-
-impl From<ValidationError> for StoreKinoError {
-    fn from(e: ValidationError) -> Self {
-        StoreKinoError::Validation(e)
-    }
 }
 
 /// Inputs for storing a new kino version (birth or version event).

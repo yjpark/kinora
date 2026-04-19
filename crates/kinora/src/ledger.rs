@@ -7,45 +7,18 @@ use crate::event::{Event, EventError};
 use crate::hash::{Hash, SHORTHASH_LEN};
 use crate::paths::{head_path, hot_dir, hot_event_path, ledger_dir, ledger_file_path, HOT_EXT};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
-    Io(io::Error),
-    Event(EventError),
+    #[error("ledger io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("ledger event error: {0}")]
+    Event(#[from] EventError),
+    #[error("no HEAD: call mint_and_append for the first event")]
     NoHead,
+    #[error("lineage file `{shorthash}.jsonl` already exists; refusing to clobber append-only file")]
     LineageAlreadyExists { shorthash: String },
+    #[error("HEAD points to lineage `{shorthash}.jsonl` but file is missing")]
     LineageMissing { shorthash: String },
-}
-
-impl std::fmt::Display for LedgerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LedgerError::Io(e) => write!(f, "ledger io error: {e}"),
-            LedgerError::Event(e) => write!(f, "ledger event error: {e}"),
-            LedgerError::NoHead => write!(f, "no HEAD: call mint_and_append for the first event"),
-            LedgerError::LineageAlreadyExists { shorthash } => write!(
-                f,
-                "lineage file `{shorthash}.jsonl` already exists; refusing to clobber append-only file"
-            ),
-            LedgerError::LineageMissing { shorthash } => write!(
-                f,
-                "HEAD points to lineage `{shorthash}.jsonl` but file is missing"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for LedgerError {}
-
-impl From<io::Error> for LedgerError {
-    fn from(e: io::Error) -> Self {
-        LedgerError::Io(e)
-    }
-}
-
-impl From<EventError> for LedgerError {
-    fn from(e: EventError) -> Self {
-        LedgerError::Event(e)
-    }
 }
 
 pub struct Ledger {

@@ -36,62 +36,28 @@ pub struct AssignEvent {
     pub provenance: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AssignError {
-    Ledger(LedgerError),
-    Event(EventError),
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Event(#[from] EventError),
+    #[error(".kinora/ not found at {}; run `kinora init` first", .path.display())]
     KinoraMissing { path: PathBuf },
+    #[error("expected event_kind=\"{}\", got {event_kind:?}", EVENT_KIND_ASSIGN)]
     NotAssignEvent { event_kind: String },
+    #[error("assign event kind must be `{}`, got {kind:?}", ASSIGN_KIND_TAG)]
     WrongKind { kind: String },
+    #[error("assign event id must equal hash (kino_id placeholder); id={id}, hash={hash}")]
     IdHashMismatch { id: String, hash: String },
+    #[error("assign event `{field}` is not a valid hex hash: {value}")]
     InvalidHash { field: &'static str, value: String },
+    #[error("assign event missing metadata key `{}`", META_TARGET_ROOT)]
     MissingTargetRoot,
+    #[error("assign target_root must be non-empty")]
     EmptyTargetRoot,
+    #[error("assign kino_id must be non-empty")]
     EmptyKinoId,
-}
-
-impl std::fmt::Display for AssignError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AssignError::Ledger(e) => write!(f, "{e}"),
-            AssignError::Event(e) => write!(f, "{e}"),
-            AssignError::KinoraMissing { path } => {
-                write!(f, ".kinora/ not found at {}; run `kinora init` first", path.display())
-            }
-            AssignError::NotAssignEvent { event_kind } => {
-                write!(f, "expected event_kind=\"{EVENT_KIND_ASSIGN}\", got {event_kind:?}")
-            }
-            AssignError::WrongKind { kind } => {
-                write!(f, "assign event kind must be `{ASSIGN_KIND_TAG}`, got {kind:?}")
-            }
-            AssignError::IdHashMismatch { id, hash } => write!(
-                f,
-                "assign event id must equal hash (kino_id placeholder); id={id}, hash={hash}"
-            ),
-            AssignError::InvalidHash { field, value } => {
-                write!(f, "assign event `{field}` is not a valid hex hash: {value}")
-            }
-            AssignError::MissingTargetRoot => {
-                write!(f, "assign event missing metadata key `{META_TARGET_ROOT}`")
-            }
-            AssignError::EmptyTargetRoot => write!(f, "assign target_root must be non-empty"),
-            AssignError::EmptyKinoId => write!(f, "assign kino_id must be non-empty"),
-        }
-    }
-}
-
-impl std::error::Error for AssignError {}
-
-impl From<LedgerError> for AssignError {
-    fn from(e: LedgerError) -> Self {
-        AssignError::Ledger(e)
-    }
-}
-
-impl From<EventError> for AssignError {
-    fn from(e: EventError) -> Self {
-        AssignError::Event(e)
-    }
 }
 
 impl AssignEvent {

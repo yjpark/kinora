@@ -116,27 +116,15 @@ pub struct Config {
     pub roots: BTreeMap<String, RootPolicy>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("failed to parse config.styx: {0}")]
     Parse(String),
+    #[error("failed to serialize config: {0}")]
     Serialize(String),
+    #[error("invalid policy for root `{root}`: `{raw}` (expected \"never\", \"<N>[smhdwy]\", or \"keep-last-<N>\")")]
     InvalidPolicy { root: String, raw: String },
 }
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Parse(m) => write!(f, "failed to parse config.styx: {m}"),
-            ConfigError::Serialize(m) => write!(f, "failed to serialize config: {m}"),
-            ConfigError::InvalidPolicy { root, raw } => write!(
-                f,
-                "invalid policy for root `{root}`: `{raw}` (expected \"never\", \"<N>[smhdwy]\", or \"keep-last-<N>\")"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 impl Config {
     pub fn from_styx(input: &str) -> Result<Self, ConfigError> {

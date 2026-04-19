@@ -55,52 +55,22 @@ pub struct Kinograph {
     pub entries: Vec<Entry>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum KinographError {
+    #[error("failed to parse kinograph: {0}")]
     Parse(String),
+    #[error("failed to serialize kinograph: {0}")]
     Serialize(String),
+    #[error("invalid entry [{idx}]: {reason}")]
     InvalidEntry { idx: usize, reason: String },
-    Resolve(ResolveError),
-    Utf8(std::string::FromUtf8Error),
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+    #[error("kinograph content is not valid UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("entry [{idx}]: name `{name}` is ambiguous; matches {}: {}", .ids.len(), .ids.join(", "))]
     AmbiguousName { idx: usize, name: String, ids: Vec<String> },
+    #[error("entry [{idx}]: no kino found for name `{name}`")]
     NameNotFound { idx: usize, name: String },
-}
-
-impl std::fmt::Display for KinographError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KinographError::Parse(m) => write!(f, "failed to parse kinograph: {m}"),
-            KinographError::Serialize(m) => write!(f, "failed to serialize kinograph: {m}"),
-            KinographError::InvalidEntry { idx, reason } => {
-                write!(f, "invalid entry [{idx}]: {reason}")
-            }
-            KinographError::Resolve(e) => write!(f, "{e}"),
-            KinographError::Utf8(e) => write!(f, "kinograph content is not valid UTF-8: {e}"),
-            KinographError::AmbiguousName { idx, name, ids } => write!(
-                f,
-                "entry [{idx}]: name `{name}` is ambiguous; matches {}: {}",
-                ids.len(),
-                ids.join(", ")
-            ),
-            KinographError::NameNotFound { idx, name } => {
-                write!(f, "entry [{idx}]: no kino found for name `{name}`")
-            }
-        }
-    }
-}
-
-impl std::error::Error for KinographError {}
-
-impl From<ResolveError> for KinographError {
-    fn from(e: ResolveError) -> Self {
-        KinographError::Resolve(e)
-    }
-}
-
-impl From<std::string::FromUtf8Error> for KinographError {
-    fn from(e: std::string::FromUtf8Error) -> Self {
-        KinographError::Utf8(e)
-    }
 }
 
 impl Kinograph {

@@ -6,65 +6,43 @@ use crate::hash::{Hash, HashParseError};
 use crate::namespace::{self, NamespaceError};
 use crate::store::{ContentStore, StoreError};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    Namespace(NamespaceError),
-    InvalidHash { field: &'static str, value: String, err: HashParseError },
+    #[error(transparent)]
+    Namespace(#[from] NamespaceError),
+    #[error("invalid hash in `{field}`: {value} — {err}")]
+    InvalidHash {
+        field: &'static str,
+        value: String,
+        #[source]
+        err: HashParseError,
+    },
+    #[error("birth event must have empty parents[]")]
     BirthEventMustHaveNoParents,
+    #[error("birth event id must equal hash")]
     BirthEventIdMustEqualHash,
+    #[error("version event id must differ from hash")]
     VersionEventIdMustDiffer,
+    #[error("parent hash not present in store: {hash}")]
     ParentNotInStore { hash: Hash },
-    ParentCorrupted { hash: Hash, err: StoreError },
+    #[error("parent content corrupted for {hash}: {err}")]
+    ParentCorrupted {
+        hash: Hash,
+        #[source]
+        err: StoreError,
+    },
+    #[error("event cannot list its own hash as a parent: {hash}")]
     SelfParenting { hash: Hash },
+    #[error("duplicate parent hash: {hash}")]
     DuplicateParent { hash: Hash },
+    #[error("event hash not present in store: {hash}")]
     EventHashNotInStore { hash: Hash },
-    EventHashCorrupted { hash: Hash, err: StoreError },
-}
-
-impl std::fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ValidationError::Namespace(e) => write!(f, "{e}"),
-            ValidationError::InvalidHash { field, value, err } => {
-                write!(f, "invalid hash in `{field}`: {value} — {err}")
-            }
-            ValidationError::BirthEventMustHaveNoParents => {
-                write!(f, "birth event must have empty parents[]")
-            }
-            ValidationError::BirthEventIdMustEqualHash => {
-                write!(f, "birth event id must equal hash")
-            }
-            ValidationError::VersionEventIdMustDiffer => {
-                write!(f, "version event id must differ from hash")
-            }
-            ValidationError::ParentNotInStore { hash } => {
-                write!(f, "parent hash not present in store: {hash}")
-            }
-            ValidationError::ParentCorrupted { hash, err } => {
-                write!(f, "parent content corrupted for {hash}: {err}")
-            }
-            ValidationError::SelfParenting { hash } => {
-                write!(f, "event cannot list its own hash as a parent: {hash}")
-            }
-            ValidationError::DuplicateParent { hash } => {
-                write!(f, "duplicate parent hash: {hash}")
-            }
-            ValidationError::EventHashNotInStore { hash } => {
-                write!(f, "event hash not present in store: {hash}")
-            }
-            ValidationError::EventHashCorrupted { hash, err } => {
-                write!(f, "event content corrupted for {hash}: {err}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ValidationError {}
-
-impl From<NamespaceError> for ValidationError {
-    fn from(e: NamespaceError) -> Self {
-        ValidationError::Namespace(e)
-    }
+    #[error("event content corrupted for {hash}: {err}")]
+    EventHashCorrupted {
+        hash: Hash,
+        #[source]
+        err: StoreError,
+    },
 }
 
 /// Validate the shape of an event: kind namespacing, metadata key

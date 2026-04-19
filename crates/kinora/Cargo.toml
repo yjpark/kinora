@@ -17,6 +17,7 @@ fastrace = { workspace = true }
 gix = { workspace = true }
 jiff = { workspace = true }
 log = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

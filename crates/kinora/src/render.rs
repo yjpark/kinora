@@ -48,19 +48,10 @@ pub struct SkippedIdentity {
     pub reason: SkipReason,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SkipReason {
+    #[error("multiple heads (fork unresolved)")]
     MultipleHeads,
-}
-
-impl std::fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkipReason::MultipleHeads => {
-                write!(f, "multiple heads (fork unresolved)")
-            }
-        }
-    }
 }
 
 /// Ordered collection of rendered pages.
@@ -70,49 +61,16 @@ pub struct Book {
     pub skipped: Vec<SkippedIdentity>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RenderError {
-    Io(io::Error),
-    Resolve(ResolveError),
-    Kinograph(KinographError),
-    Utf8(std::string::FromUtf8Error),
-}
-
-impl std::fmt::Display for RenderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RenderError::Io(e) => write!(f, "render io error: {e}"),
-            RenderError::Resolve(e) => write!(f, "{e}"),
-            RenderError::Kinograph(e) => write!(f, "{e}"),
-            RenderError::Utf8(e) => write!(f, "kino content is not valid UTF-8: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for RenderError {}
-
-impl From<io::Error> for RenderError {
-    fn from(e: io::Error) -> Self {
-        RenderError::Io(e)
-    }
-}
-
-impl From<ResolveError> for RenderError {
-    fn from(e: ResolveError) -> Self {
-        RenderError::Resolve(e)
-    }
-}
-
-impl From<KinographError> for RenderError {
-    fn from(e: KinographError) -> Self {
-        RenderError::Kinograph(e)
-    }
-}
-
-impl From<std::string::FromUtf8Error> for RenderError {
-    fn from(e: std::string::FromUtf8Error) -> Self {
-        RenderError::Utf8(e)
-    }
+    #[error("render io error: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+    #[error(transparent)]
+    Kinograph(#[from] KinographError),
+    #[error("kino content is not valid UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
 }
 
 /// Render every identity's current head into a `Book`, stamping each page

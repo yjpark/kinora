@@ -45,139 +45,53 @@ pub struct AssignCandidate {
     pub ts: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CompactError {
-    Io(io::Error),
-    Ledger(LedgerError),
-    Store(StoreError),
-    Event(EventError),
-    Root(RootError),
-    StoreKino(StoreKinoError),
-    Config(ConfigError),
-    Assign(AssignError),
-    Kinograph(KinographError),
-    InvalidHash { value: String, err: HashParseError },
+    #[error("compact io error: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Event(#[from] EventError),
+    #[error(transparent)]
+    Root(#[from] RootError),
+    #[error(transparent)]
+    StoreKino(#[from] StoreKinoError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Assign(#[from] AssignError),
+    #[error(transparent)]
+    Kinograph(#[from] KinographError),
+    #[error("invalid hash `{value}`: {err}")]
+    InvalidHash {
+        value: String,
+        #[source]
+        err: HashParseError,
+    },
+    #[error("identity {id} has {} heads at compact time: {}", .heads.len(), .heads.join(", "))]
     MultipleHeads { id: String, heads: Vec<String> },
+    #[error("identity {id} has no head (event graph cycle?)")]
     NoHead { id: String },
+    #[error("prior root pointer references version {version} but no matching event is in the ledger")]
     PriorEventMissing { version: String },
+    #[error("root pointer at {} is not a 64-hex hash: {body:?}", .path.display())]
     InvalidPointer { path: PathBuf, body: String },
+    #[error("invalid root name {name:?}: must be a single path component with no `/`, `\\`, or `..`")]
     InvalidRootName { name: String },
     /// A kino has two or more live (non-superseded) assign events pointing
     /// at it. The compact cannot decide ownership; the user must author a
     /// tie-breaking assign whose `supersedes` list names all candidates.
+    #[error("ambiguous assigns for kino {kino_id}: {} live candidates", .candidates.len())]
     AmbiguousAssign { kino_id: String, candidates: Vec<AssignCandidate> },
     /// A live assign references a root name that is not declared in
     /// `config.styx`. Raised during `compact_root` regardless of which
     /// root is currently being compacted — an undeclared target is a
     /// config/user error that must be fixed globally.
+    #[error("unknown root `{name}` referenced by assign event {event_hash}")]
     UnknownRoot { name: String, event_hash: String },
-}
-
-impl std::fmt::Display for CompactError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompactError::Io(e) => write!(f, "compact io error: {e}"),
-            CompactError::Ledger(e) => write!(f, "{e}"),
-            CompactError::Store(e) => write!(f, "{e}"),
-            CompactError::Event(e) => write!(f, "{e}"),
-            CompactError::Root(e) => write!(f, "{e}"),
-            CompactError::StoreKino(e) => write!(f, "{e}"),
-            CompactError::Config(e) => write!(f, "{e}"),
-            CompactError::InvalidHash { value, err } => {
-                write!(f, "invalid hash `{value}`: {err}")
-            }
-            CompactError::MultipleHeads { id, heads } => write!(
-                f,
-                "identity {id} has {} heads at compact time: {}",
-                heads.len(),
-                heads.join(", ")
-            ),
-            CompactError::NoHead { id } => write!(
-                f,
-                "identity {id} has no head (event graph cycle?)"
-            ),
-            CompactError::PriorEventMissing { version } => write!(
-                f,
-                "prior root pointer references version {version} but no matching event is in the ledger"
-            ),
-            CompactError::InvalidPointer { path, body } => write!(
-                f,
-                "root pointer at {} is not a 64-hex hash: {body:?}",
-                path.display()
-            ),
-            CompactError::InvalidRootName { name } => write!(
-                f,
-                "invalid root name {name:?}: must be a single path component with no `/`, `\\`, or `..`"
-            ),
-            CompactError::Assign(e) => write!(f, "{e}"),
-            CompactError::Kinograph(e) => write!(f, "{e}"),
-            CompactError::AmbiguousAssign { kino_id, candidates } => write!(
-                f,
-                "ambiguous assigns for kino {kino_id}: {} live candidates",
-                candidates.len()
-            ),
-            CompactError::UnknownRoot { name, event_hash } => write!(
-                f,
-                "unknown root `{name}` referenced by assign event {event_hash}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CompactError {}
-
-impl From<io::Error> for CompactError {
-    fn from(e: io::Error) -> Self {
-        CompactError::Io(e)
-    }
-}
-
-impl From<LedgerError> for CompactError {
-    fn from(e: LedgerError) -> Self {
-        CompactError::Ledger(e)
-    }
-}
-
-impl From<StoreError> for CompactError {
-    fn from(e: StoreError) -> Self {
-        CompactError::Store(e)
-    }
-}
-
-impl From<EventError> for CompactError {
-    fn from(e: EventError) -> Self {
-        CompactError::Event(e)
-    }
-}
-
-impl From<RootError> for CompactError {
-    fn from(e: RootError) -> Self {
-        CompactError::Root(e)
-    }
-}
-
-impl From<StoreKinoError> for CompactError {
-    fn from(e: StoreKinoError) -> Self {
-        CompactError::StoreKino(e)
-    }
-}
-
-impl From<ConfigError> for CompactError {
-    fn from(e: ConfigError) -> Self {
-        CompactError::Config(e)
-    }
-}
-
-impl From<AssignError> for CompactError {
-    fn from(e: AssignError) -> Self {
-        CompactError::Assign(e)
-    }
-}
-
-impl From<KinographError> for CompactError {
-    fn from(e: KinographError) -> Self {
-        CompactError::Kinograph(e)
-    }
 }
 
 /// Inputs for a compact call. Mirrors the parts of `StoreKinoParams` that

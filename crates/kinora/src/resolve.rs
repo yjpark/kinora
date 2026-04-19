@@ -6,59 +6,26 @@ use crate::hash::{Hash, HashParseError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::store::{ContentStore, StoreError};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
-    Ledger(LedgerError),
-    Store(StoreError),
-    InvalidHash { value: String, err: HashParseError },
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("invalid hash `{value}`: {err}")]
+    InvalidHash {
+        value: String,
+        #[source]
+        err: HashParseError,
+    },
+    #[error("no kino found for `{query}`")]
     NotFound { query: String },
+    #[error("name `{name}` is ambiguous; matches {} identities: {}", .ids.len(), .ids.join(", "))]
     AmbiguousName { name: String, ids: Vec<String> },
+    #[error("identity {id} has {} heads; pass --version HASH or --all-heads", .heads.len())]
     MultipleHeads { id: String, heads: Vec<Event>, lineages: Vec<String> },
+    #[error("identity {id} has no version with hash {version}")]
     VersionNotFound { id: String, version: String },
-}
-
-impl std::fmt::Display for ResolveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ResolveError::Ledger(e) => write!(f, "{e}"),
-            ResolveError::Store(e) => write!(f, "{e}"),
-            ResolveError::InvalidHash { value, err } => {
-                write!(f, "invalid hash `{value}`: {err}")
-            }
-            ResolveError::NotFound { query } => {
-                write!(f, "no kino found for `{query}`")
-            }
-            ResolveError::AmbiguousName { name, ids } => write!(
-                f,
-                "name `{name}` is ambiguous; matches {} identities: {}",
-                ids.len(),
-                ids.join(", ")
-            ),
-            ResolveError::MultipleHeads { id, heads, .. } => write!(
-                f,
-                "identity {id} has {} heads; pass --version HASH or --all-heads",
-                heads.len()
-            ),
-            ResolveError::VersionNotFound { id, version } => write!(
-                f,
-                "identity {id} has no version with hash {version}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ResolveError {}
-
-impl From<LedgerError> for ResolveError {
-    fn from(e: LedgerError) -> Self {
-        ResolveError::Ledger(e)
-    }
-}
-
-impl From<StoreError> for ResolveError {
-    fn from(e: StoreError) -> Self {
-        ResolveError::Store(e)
-    }
 }
 
 /// All events belonging to a single identity, with heads precomputed.

@@ -6,44 +6,18 @@ use std::path::{Path, PathBuf};
 use crate::config::{Config, ConfigError, RootPolicy, DEFAULT_INBOX_POLICY};
 use crate::paths::{config_path, kinora_root, ledger_dir, store_dir};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum InitError {
-    Io(io::Error),
+    #[error("init io error: {0}")]
+    Io(#[from] io::Error),
+    #[error(".kinora/ already exists at {}", .path.display())]
     AlreadyInitialized { path: PathBuf },
+    #[error("could not determine repo-url: no --repo-url and no `origin` remote found")]
     RepoUrlUnresolved,
+    #[error("git error: {0}")]
     Git(String),
-    Config(ConfigError),
-}
-
-impl std::fmt::Display for InitError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InitError::Io(e) => write!(f, "init io error: {e}"),
-            InitError::AlreadyInitialized { path } => {
-                write!(f, ".kinora/ already exists at {}", path.display())
-            }
-            InitError::RepoUrlUnresolved => write!(
-                f,
-                "could not determine repo-url: no --repo-url and no `origin` remote found"
-            ),
-            InitError::Git(m) => write!(f, "git error: {m}"),
-            InitError::Config(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for InitError {}
-
-impl From<io::Error> for InitError {
-    fn from(e: io::Error) -> Self {
-        InitError::Io(e)
-    }
-}
-
-impl From<ConfigError> for InitError {
-    fn from(e: ConfigError) -> Self {
-        InitError::Config(e)
-    }
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 }
 
 /// Initialize `.kinora/` under `repo_root` with the given `repo_url`.

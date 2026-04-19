@@ -7,26 +7,13 @@ pub const SHORTHASH_LEN: usize = 8;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Hash(String);
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum HashParseError {
+    #[error("hash must be {HASH_HEX_LEN} hex chars, got {got}")]
     WrongLength { got: usize },
+    #[error("hash must be lowercase hex [0-9a-f]")]
     NotLowerHex,
 }
-
-impl fmt::Display for HashParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HashParseError::WrongLength { got } => {
-                write!(f, "hash must be {HASH_HEX_LEN} hex chars, got {got}")
-            }
-            HashParseError::NotLowerHex => {
-                write!(f, "hash must be lowercase hex [0-9a-f]")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HashParseError {}
 
 impl Hash {
     pub fn of_content(content: &[u8]) -> Self {

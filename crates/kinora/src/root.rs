@@ -39,30 +39,17 @@ pub struct RootKinograph {
     pub entries: Vec<RootEntry>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RootError {
+    #[error("failed to parse root kinograph: {0}")]
     Parse(String),
+    #[error("failed to serialize root kinograph: {0}")]
     Serialize(String),
+    #[error("invalid root entry [{idx}]: {reason}")]
     InvalidEntry { idx: usize, reason: String },
+    #[error("duplicate id at entry [{idx}]: {id}")]
     DuplicateId { idx: usize, id: String },
 }
-
-impl std::fmt::Display for RootError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RootError::Parse(m) => write!(f, "failed to parse root kinograph: {m}"),
-            RootError::Serialize(m) => write!(f, "failed to serialize root kinograph: {m}"),
-            RootError::InvalidEntry { idx, reason } => {
-                write!(f, "invalid root entry [{idx}]: {reason}")
-            }
-            RootError::DuplicateId { idx, id } => {
-                write!(f, "duplicate id at entry [{idx}]: {id}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RootError {}
 
 impl RootEntry {
     /// Build a minimal root entry. Note and pin default to their

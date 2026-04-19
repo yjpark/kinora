@@ -22,26 +22,15 @@ pub const RESERVED_KINDS: &[&str] = &[
     "root",
 ];
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum NamespaceError {
+    #[error("unknown bare key `{0}`; use `prefix::{0}` for extensions")]
     UnknownBareKey(String),
+    #[error("empty namespace prefix before `::`")]
     EmptyNamespace,
+    #[error("empty name after `::`")]
     EmptyName,
 }
-
-impl std::fmt::Display for NamespaceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NamespaceError::UnknownBareKey(k) => {
-                write!(f, "unknown bare key `{k}`; use `prefix::{k}` for extensions")
-            }
-            NamespaceError::EmptyNamespace => write!(f, "empty namespace prefix before `::`"),
-            NamespaceError::EmptyName => write!(f, "empty name after `::`"),
-        }
-    }
-}
-
-impl std::error::Error for NamespaceError {}
 
 pub fn is_namespaced(key: &str) -> bool {
     key.contains(NAMESPACE_SEPARATOR)

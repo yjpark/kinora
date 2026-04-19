@@ -6,37 +6,18 @@ use crate::hash::{Hash, HashParseError};
 use crate::namespace::ext_for_kind;
 use crate::paths::{find_blob_path, store_blob_path_with_ext, store_dir};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    Io(io::Error),
+    #[error("content store io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("content hash mismatch at {}: expected {expected}, got {got}", .path.display())]
     HashMismatch { expected: Hash, got: Hash, path: PathBuf },
-    InvalidStoredHash { path: PathBuf, err: HashParseError },
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StoreError::Io(e) => write!(f, "content store io error: {e}"),
-            StoreError::HashMismatch { expected, got, path } => write!(
-                f,
-                "content hash mismatch at {}: expected {expected}, got {got}",
-                path.display()
-            ),
-            StoreError::InvalidStoredHash { path, err } => write!(
-                f,
-                "invalid hash in stored path {}: {err}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-impl From<io::Error> for StoreError {
-    fn from(e: io::Error) -> Self {
-        StoreError::Io(e)
-    }
+    #[error("invalid hash in stored path {}: {err}", .path.display())]
+    InvalidStoredHash {
+        path: PathBuf,
+        #[source]
+        err: HashParseError,
+    },
 }
 
 pub struct ContentStore {

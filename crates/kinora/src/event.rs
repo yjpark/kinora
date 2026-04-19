@@ -69,22 +69,13 @@ impl From<LegacyEvent> for Event {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EventError {
+    #[error("event serialize error: {0}")]
     Serialize(String),
+    #[error("event parse error: {0}")]
     Parse(String),
 }
-
-impl std::fmt::Display for EventError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EventError::Serialize(m) => write!(f, "event serialize error: {m}"),
-            EventError::Parse(m) => write!(f, "event parse error: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for EventError {}
 
 impl Event {
     /// Construct a store-kind event. Syntactic sugar so call sites don't
