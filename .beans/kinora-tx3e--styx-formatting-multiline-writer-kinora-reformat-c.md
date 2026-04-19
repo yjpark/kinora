@@ -1,11 +1,11 @@
 ---
 # kinora-tx3e
 title: 'Styx formatting: multiline writer + kinora reformat command'
-status: draft
+status: todo
 type: feature
 priority: normal
 created_at: 2026-04-19T15:12:02Z
-updated_at: 2026-04-19T16:01:04Z
+updated_at: 2026-04-19T16:58:19Z
 blocked_by:
     - kinora-jezf
 ---
@@ -167,3 +167,56 @@ cst_format.rs:292 determines multiline layout purely from the parsed CST's separ
 4. **Wait for upstream:** park this work; readability isn't blocking core functionality.
 
 Leaving for user to decide direction. Reverted uncommitted code changes (new `styx.rs`, call-site updates, failing test) so the tree stays clean.
+
+## Revised plan: adopt styxl format for kinograph kinos
+
+Supersedes the "Part 1 writer switch" approach above. That path depends on an upstream fix to facet-styx's `ForceStyle::Multiline` short-circuit, which is out of our hands.
+
+### New approach
+
+Kinograph kinos adopt a JSONL-style layout we call **styxl**: each line is an independently-parseable inline-form styx document for one entry. The file IS the sequence — no outer `entries ( ... )` wrapping.
+
+Example (single entry per line):
+```
+{id 0dab...c017, version 0dab...c017, kind markdown, metadata {name identity-and-versions, tags design-principle, title "Identity and versions"}, note "", pin false}
+{id 1c8b...fa46, version 1c8b...fa46, kind markdown, metadata {name provenance-mandatory, tags design-principle, title "Provenance is mandatory"}, note "", pin false}
+```
+
+### Why styxl beats the original writer-switch plan
+
+- **No upstream dependency.** Per-entry inline serialization works correctly in facet-styx today.
+- **Stream / grep / tail friendly.** `head -1 k.styxl` returns one valid entry; `grep 'id 0dab' *.styxl` finds hits directly.
+- **Minimum-delta diffs.** No wrapper context lines; every git line-change is a semantic change.
+- **Cheaper implementation.** Two small wrappers (`to_styxl` / `parse_styxl`) over `facet_styx::to_string` / `from_str` on `Entry`, instead of a new formatter path.
+
+### Scope
+
+- **Kinograph kinos** (kind `kinograph`, which produces `Kinograph` content) → styxl
+- **Root kinographs** (`RootKinograph` content in the store) → styxl
+- **Config.styx** → unchanged. Not a list-of-entries shape; single-line output is not a pain point.
+
+### File extension
+
+New extension: `.styxl`. Signals the new format to tooling, matches the jsonl precedent. Updates needed in whatever maps kind → extension. The store's `find_blob_path` already strips extensions when looking up blobs, so content-addressed lookups still work across the transition.
+
+### Schema evolution (future)
+
+YAGNI today — kinograph has only ever been `{ entries: Vec<Entry> }`. If we ever need a top-level header (schema version, description), reserve the first line of a styxl file for a header object distinguishable from entry objects (e.g. `{schema-version 2, ...}` — distinguishable by the absence of an `id` field). Documented as a future option, not built now.
+
+### Revised Todos
+
+- [ ] Add `Kinograph::to_styxl` and `Kinograph::parse_styxl` in `kinograph.rs`; switch internal callers
+- [ ] Add `RootKinograph::to_styxl` and `RootKinograph::parse_styxl` in `root.rs`; switch internal callers
+- [ ] Switch kinograph-kind writes to produce `.styxl` blobs (update kind → extension mapping)
+- [ ] Tests: round-trip, empty entries, edge cases (escaped strings, long metadata)
+- [ ] Tests: per-line parsing independence (corrupt one line, others still load via a recovery path — or hard-fail cleanly; pick one and document)
+- [ ] Implement `kinora reformat`: walk reachable kinograph kinos, rewrite from `.styx` wrapped to `.styxl`, stage new-version events
+- [ ] Tests: reformat over a repo with legacy `.styx` kinos; idempotent after
+
+### Revised acceptance
+
+- Kinograph kinos are written as `.styxl` — one entry per line
+- `kinora reformat` migrates existing `.styx` kinograph blobs to `.styxl` via staged new-version events
+- After `kinora commit`, reformatted kinos are heads; `kinora render` shows unchanged user-visible output
+- Idempotent on already-styxl repos (zero staged events)
+- Zero compiler warnings, all tests pass

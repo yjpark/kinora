@@ -1,11 +1,11 @@
 ---
 # kinora-q6bo
 title: Clean staged after commit; preserve history as kino in 'commits' root
-status: draft
+status: todo
 type: feature
 priority: normal
 created_at: 2026-04-19T14:39:21Z
-updated_at: 2026-04-19T15:47:21Z
+updated_at: 2026-04-19T16:33:02Z
 blocked_by:
     - kinora-2t6l
 ---
@@ -64,3 +64,35 @@ Marked back to draft during night shift after attempting to execute.
 5. **Render exclusion signal:** the bean says "like root-kind kinos are skipped". The render layer would need either (a) a config field marking a root as infrastructure, or (b) a hardcoded name check for `commits`. (a) is more extensible; (b) simpler. Needs a call.
 
 Leaving for user to resolve in a follow-up session; proceeding to kinora-b1mg next.
+
+## Resolved: Q1 archive granularity → per-root
+
+Per-root archive: one archive kino per root per version-bump. Identity = the root's new_version hash (already canonical, no invented run-hash). Each archive's parent is the previous archive for that same root. Mirrors per-branch commit tracking in git.
+
+Per-run queries ("what did this invocation do?") are synthesizable later via `kinora log` — either timestamp-cluster archives, or stamp a shared run-id field into each archive at commit time. Low priority, not in v1.
+
+## Resolved: Q2 commits-root recursion → special-case self-archive
+
+The `commits` root skips archive creation for its own version bumps. The `commits` kinograph already records "archive X added at version V" as its own entries; an archive-of-the-archives would just duplicate that. Staged empties cleanly. Other roots (non-`commits`) still produce archives normally.
+
+Transient assign-events that plumbed archives into `commits` get dropped without archiving — they carry only the archive kino id, which is already recorded in the commits kinograph. (Analog: git reflog vs git commits; reflog is ephemeral by design.)
+
+## Resolved: Q3/Q4/Q5 — mirror the inbox pattern
+
+**Q3 — reserved vs user-declared:** mirror the existing `inbox` pattern. Auto-provision `commits` in `Config::from_styx` if absent (config.rs:146 is the model). Hardcoded by name (`"commits"`) throughout the codebase, same as `"inbox"`. User can override the policy in `config.styx`; user's explicit policy wins. User cannot remove it — library re-injects on load. Visible in config after first serialize.
+
+**Q4 — keep-all policy:** no new `RootPolicy` variant. Reuse existing `RootPolicy::Never` as the default for the `commits` root. Semantically "never drop anything" is exactly what we want for an archive root. Saves churn.
+
+**Q5 — render exclusion signal:** hardcoded name check. `if root_name == "commits" { skip }` in render. Consistent with how infrastructure rules (like the inbox default target) live as hardcoded name lookups today. If a general infra-root marker becomes justified later, migrate the hardcoded checks then. YAGNI now.
+
+## Bean ready to proceed
+
+All 5 open design questions resolved. Implementation can proceed:
+
+1. Q1 decided: per-root archive kinos, identity = root's new_version hash
+2. Q2 decided: `commits` root special-cases skip self-archive
+3. Q3 decided: auto-provision in `Config::from_styx`, hardcoded by name
+4. Q4 decided: reuse `RootPolicy::Never`
+5. Q5 decided: hardcoded name check in render
+
+Bean is no longer blocked by ambiguity. Still blocked-by kinora-2t6l (rename hot→staged) — though that is completed. Move to `todo` when ready for implementation.

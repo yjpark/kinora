@@ -1,11 +1,11 @@
 ---
 # kinora-b1mg
 title: 'kinora clone: rebuild .kinora/ into a fresh directory'
-status: draft
+status: todo
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:05Z
-updated_at: 2026-04-19T15:51:48Z
+updated_at: 2026-04-19T16:33:49Z
 blocked_by:
     - kinora-jezf
     - kinora-q6bo
