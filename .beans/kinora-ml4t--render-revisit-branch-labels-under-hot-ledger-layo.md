@@ -1,11 +1,11 @@
 ---
 # kinora-ml4t
 title: 'Render: revisit branch labels under hot-ledger layout'
-status: in-progress
+status: completed
 type: task
 priority: low
 created_at: 2026-04-19T06:23:45Z
-updated_at: 2026-04-19T08:24:47Z
+updated_at: 2026-04-19T08:27:59Z
 parent: kinora-w7w0
 ---
 
@@ -107,3 +107,34 @@ This bean can land in phase 2 — it doesn't block on kinora-hxmw. The `unrefere
 1. **Tests commit**: stub the new library + CLI signatures (return empty), update every existing test to the new API, add the new tests. Tests compile; failures are assertion failures, not compile errors (per CLAUDE.md TDD rule).
 2. **Implementation commit**: replace stubs with real logic (label lookup, root-kind skip, `build_owners_map`). All tests pass; zero warnings.
 3. **Review commit** (if needed): fixes from subagent review.
+
+## Summary of Changes
+
+Rendered pages are now grouped by **owning root kinograph name** instead of the legacy "branch" label (which was meaningless under the hot-ledger layout).
+
+**Library (`crates/kinora/src/render.rs`)**
+- Renamed `render_for_branch(resolver, branch)` → `render(resolver, labels: &HashMap<String, String>, default_label: &str)`.
+- Renamed `RenderedPage.branch` → `RenderedPage.group`.
+- Renamed internal helpers: `group_by_branch` → `group_by_label`, `branch_index_md` → `group_index_md`.
+- Source marker: "Rendered from branch `X`" → "Rendered from `X`".
+- `SkipReason::MultipleHeads` display: dropped "branch tiebreaker" wording.
+- Skip `kind == "root"` kinos entirely from render output — roots are internal bookkeeping, not user content.
+
+**CLI (`crates/kinora-cli/src/render.rs`)**
+- Removed `current_branch_label` (read legacy `.kinora/HEAD`).
+- Added `build_owners_map(kin_root) -> Result<HashMap<String, String>, CliError>` that scans `.kinora/roots/`, loads each root blob via `ContentStore`, parses it as a `RootKinograph`, and records every entry id under its root name.
+- Pointer names are sorted before iteration for deterministic multi-root insertion order (until phase 3 enforces exclusive ownership).
+- NotFound roots dir → empty map (pure-hot repos render under `"unreferenced"`).
+- Tmp files (`.<name>.tmp`) and non-file entries under `.kinora/roots/` are silently skipped.
+- Introduced `CliError::{Store, Root}` variants for the new downstream error types.
+
+**Tests**
+- Library: `render_uses_label_from_map_when_id_is_present`, `render_falls_back_to_default_label_for_unmapped_id`, `render_skips_root_kind_kinos` (+ rename `branch_label_propagates_to_every_page` → `default_label_propagates_to_every_page_when_map_is_empty`).
+- CLI: `build_owners_map_empty_when_no_roots_dir`, `build_owners_map_maps_entries_to_root_name`, `build_owners_map_ignores_tmp_and_non_file_entries`, plus three end-to-end render tests — pure-hot (`unreferenced/`), compacted `main`, and mixed.
+
+All 231 + 54 tests pass; zero compiler warnings.
+
+**Commits**
+- `837e921` — test(render): per-root grouping API + failing tests
+- `d45aa6e` — feat(render): group pages by owning root
+- `19d850a` — fix(render): deterministic root ordering + tmp-file skip test
