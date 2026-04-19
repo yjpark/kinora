@@ -1,11 +1,11 @@
 ---
 # kinora-q6bo
 title: Clean staged after commit; preserve history as kino in 'commits' root
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-19T14:39:21Z
-updated_at: 2026-04-19T18:41:32Z
+updated_at: 2026-04-19T18:42:23Z
 blocked_by:
     - kinora-2t6l
 ---
@@ -135,3 +135,16 @@ Three phases, each TDD cycle (tests → impl → review fix). Complete 1 phase =
 - [x] Phase C: commit pipeline archive + cleanup + special-case
 - [x] Phase C: render exclusion
 - [x] Review pass
+
+## Summary of Changes
+
+Shipped the per-commit archive lifecycle for non-commits roots across 5 focused commits:
+
+1. `test(config)` + `feat(config)` — auto-provision the `commits` root with `RootPolicy::Never` in `Config::from_styx`, mirroring the existing `inbox` pattern.
+2. `test(commit_archive)` + `feat(commit_archive)` — new `kinora::commit_archive` module with a v1 JSONL wire format (header line `{"@schema":"kinora-commit-archive-v1"}` + one `Event.to_json_line()` per event), plus a hand-rolled header parser so the reader stays trivial.
+3. `feat(commit)` (commits-last + render skip) — reorder `commit_all` so `commits` iterates after all other roots with a fresh ledger re-read, and skip the `commits` root in CLI render's owners map.
+4. `feat(commit)` (archive integration) — add `maybe_archive_owned_events` to `commit_root_with_refs`: after a successful pointer write for a non-commits root that actually promoted work, collect the owned staged events (stores routed via live-assigns + assigns into this root), serialize, store via ContentStore with kind `commit-archive`, and write an assign into `commits`. Guarded by content-addressing plus a live-assign check for idempotency. Also adds `commit-archive` to namespace RESERVED_KINDS (+ `jsonl` extension) and skips the kind in `render()`.
+5. `test(commit)` — four end-to-end integration tests locking in the invariants: archive kino + assign are produced, `commits` root doesn't archive itself, commits kinograph contains the archive after `commit_all`, and repeated runs with unchanged state are idempotent (no duplicate archive or assign).
+6. `fix(commit)` — review follow-ups: tighten `collect_owned_staged_events` to propagate malformed assigns via `?`, document the two idempotency guards as crash-recovery safety nets, add a "two runs with new activity stack distinct archives" test, and extend the namespace ext-test.
+
+Staged cleanup itself was deferred to kinora-bayr — the archive flow needs to land and be exercised before pruning staged events (requires `merge_prior_unpinned_entries`-like logic so `build_root` still sees kinos archived-and-pruned across subsequent commits).
