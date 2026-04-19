@@ -1,11 +1,11 @@
 ---
 # kinora-ml4t
 title: 'Render: revisit branch labels under hot-ledger layout'
-status: draft
+status: todo
 type: task
 priority: low
 created_at: 2026-04-19T06:23:45Z
-updated_at: 2026-04-19T07:21:06Z
+updated_at: 2026-04-19T07:47:49Z
 parent: kinora-w7w0
 ---
 
@@ -15,7 +15,7 @@ Observed while completing kinora-ve9g. Not urgent — pages still render and rea
 
 ## Acceptance
 
-- [ ] Decide what 'branch' means under hot-ledger (per-author? per-worktree? none?)
+- [x] Decide what grouping means under hot-ledger — **per-root** (see Resolution below)
 - [ ] Update `render` to derive labels from event metadata or drop the grouping when not meaningful
 - [ ] Test covers both pure-hot and mixed hot+legacy repos
 
@@ -42,3 +42,33 @@ The first acceptance item is itself the open question: what does 'branch' mean u
 ### Suggested next step
 
 Pick one of (1) or (3) and promote this bean back to todo with the decision recorded. (2) and (4) feel weaker. Leaning (3) because roots are now the native grouping primitive under xi21; but (1) is the minimum-change path and would unblock the render UX fix today.
+
+## Resolution (2026-04-19)
+
+Group rendered pages by **owning root**. Under xi21 §7–§8 ownership is exclusive — every kino has exactly one owning root once phase 3 (kinora-hxmw) lands. Today (phase 2) there is only a single root (`main`), so grouping is trivially one bucket; the structure is future-proof for multi-root without render-layer rework.
+
+### Sub-cases
+
+- **Kino's owning root exists**: page goes under `src/<root-name>/` in the rendered mdBook. Labelled by root name (`main`, `rfcs`, `inbox`, …) — not by an opaque shorthash.
+- **Kino is not yet compacted into any root** (pre-first-compact, or post-hot-write pre-next-compact): group under `unreferenced/`. Phase 3 makes this bucket near-empty by auto-assigning to `inbox`; phase 2 users will see it populated until they run `kinora compact`.
+- **Multiple roots (phase 2)**: can't happen — only `main` exists. No code needed for this case today beyond reading the one pointer file.
+- **Multiple roots (phase 3+)**: each kino is owned by exactly one, so each page appears in exactly one group. Composition kinographs (which are not roots) don't affect grouping.
+
+### Implementation sketch
+
+1. Replace `current_branch_label` in `kinora-cli/src/render.rs` with a loader that reads all root pointers under `.kinora/roots/` and, for each, reads the root blob to get its entry ids.
+2. Replace `render_for_branch` signature with something like `render_for_roots(resolver, owners: HashMap<id, root_name>)` — or keep the per-page-stamp shape but derive the stamp from owning root instead of a single global label.
+3. `write_book` already groups by `page.branch`; the directory naming becomes root name.
+4. Tests: pure-hot repo with no compact (everything in `unreferenced/`), single `main` root post-compact, and (deferred to phase 3) multi-root with assign events.
+
+### Scope note
+
+This bean can land in phase 2 — it doesn't block on kinora-hxmw. The `unreferenced/` bucket is how pre-compact kinos are handled today; phase 3 will shrink that bucket by auto-assigning to `inbox` but won't change the render code paths.
+
+- [ ] Swap `current_branch_label` for a roots-pointer reader
+- [ ] Build `owners: HashMap<id, root_name>` by reading each root's entries
+- [ ] Kinos not in any root → `"unreferenced"` bucket
+- [ ] Render groups pages under `src/<root-name>/` in the mdBook
+- [ ] Test: pure-hot repo with no compact → all pages under `unreferenced/`
+- [ ] Test: single `main` root post-compact → all pages under `main/`
+- [ ] Test: mixed (some compacted, some not) → correct split between root name and `unreferenced/`
