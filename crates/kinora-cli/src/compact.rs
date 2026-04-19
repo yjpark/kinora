@@ -58,19 +58,53 @@ pub fn run_compact(cwd: &Path, args: CompactRunArgs) -> Result<CompactRunReport,
 pub fn render_compact_entry<W: Write>(w: &mut W, entry: &CompactAllEntry) -> io::Result<()> {
     let (name, result) = entry;
     match result {
-        Ok(r) => match &r.new_version {
-            Some(h) => writeln!(w, "root={} version={} (new version)", name, h.shorthash()),
-            None => {
-                let version = r
-                    .prior_version
-                    .as_ref()
-                    .map(|h| h.shorthash().to_owned())
-                    .unwrap_or_else(|| "-".into());
-                writeln!(w, "root={name} version={version} (no-op)")
+        Ok(r) => {
+            let retention_hint = render_retention_hint(&r.retained_by_cross_root);
+            match &r.new_version {
+                Some(h) => writeln!(
+                    w,
+                    "root={} version={} (new version{retention_hint})",
+                    name,
+                    h.shorthash()
+                ),
+                None => {
+                    let version = r
+                        .prior_version
+                        .as_ref()
+                        .map(|h| h.shorthash().to_owned())
+                        .unwrap_or_else(|| "-".into());
+                    writeln!(w, "root={name} version={version} (no-op{retention_hint})")
+                }
             }
-        },
+        }
         Err(e) => render_compact_error(w, name, e),
     }
+}
+
+/// Render the cross-root retention hint as a trailing clause inside the
+/// status parens. Returns an empty string when no entries were rescued
+/// by a cross-root reference. Format:
+///
+/// ```text
+/// ; 2 entries retained by cross-root refs from main
+/// ; 3 entries retained by cross-root refs from main, rfcs
+/// ```
+///
+/// Root names are listed in the BTreeMap's natural sort order. Counts
+/// sum across all referencing roots — a single entry referenced by two
+/// roots contributes to both tallies, so the leading number is the
+/// total-retention count, not the unique-entry count.
+fn render_retention_hint(retained: &std::collections::BTreeMap<String, usize>) -> String {
+    if retained.is_empty() {
+        return String::new();
+    }
+    let total: usize = retained.values().sum();
+    let roots: Vec<&str> = retained.keys().map(|s| s.as_str()).collect();
+    let plural = if total == 1 { "entry" } else { "entries" };
+    format!(
+        "; {total} {plural} retained by cross-root refs from {}",
+        roots.join(", ")
+    )
 }
 
 /// Render a `CompactError` under a named root. `AmbiguousAssign` and
@@ -381,5 +415,106 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
         render_compact_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(out, "root=inbox version=- (no-op)\n");
+    }
+
+    #[test]
+    fn render_compact_entry_appends_retention_hint_from_single_root() {
+        use std::str::FromStr;
+        let hash = kinora::hash::Hash::from_str(&"a".repeat(64)).unwrap();
+        let entry: CompactAllEntry = (
+            "inbox".into(),
+            Ok(kinora::compact::CompactResult {
+                root_name: "inbox".into(),
+                new_version: Some(hash.clone()),
+                prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::from([
+                    ("main".to_string(), 2),
+                ]),
+            }),
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        render_compact_entry(&mut buf, &entry).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "root=inbox version={} (new version; 2 entries retained by cross-root refs from main)\n",
+                hash.shorthash()
+            )
+        );
+    }
+
+    #[test]
+    fn render_compact_entry_appends_retention_hint_from_multiple_roots_sorted() {
+        use std::str::FromStr;
+        let hash = kinora::hash::Hash::from_str(&"b".repeat(64)).unwrap();
+        let entry: CompactAllEntry = (
+            "rfcs".into(),
+            Ok(kinora::compact::CompactResult {
+                root_name: "rfcs".into(),
+                new_version: Some(hash.clone()),
+                prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::from([
+                    ("zeta".to_string(), 1),
+                    ("main".to_string(), 2),
+                ]),
+            }),
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        render_compact_entry(&mut buf, &entry).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "root=rfcs version={} (new version; 3 entries retained by cross-root refs from main, zeta)\n",
+                hash.shorthash()
+            )
+        );
+    }
+
+    #[test]
+    fn render_compact_entry_retention_hint_uses_singular_for_one_entry() {
+        use std::str::FromStr;
+        let hash = kinora::hash::Hash::from_str(&"c".repeat(64)).unwrap();
+        let entry: CompactAllEntry = (
+            "inbox".into(),
+            Ok(kinora::compact::CompactResult {
+                root_name: "inbox".into(),
+                new_version: Some(hash.clone()),
+                prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::from([
+                    ("main".to_string(), 1),
+                ]),
+            }),
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        render_compact_entry(&mut buf, &entry).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("1 entry retained"),
+            "singular form for 1 entry: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_compact_entry_retention_hint_attaches_to_no_op_too() {
+        let entry: CompactAllEntry = (
+            "inbox".into(),
+            Ok(kinora::compact::CompactResult {
+                root_name: "inbox".into(),
+                new_version: None,
+                prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::from([
+                    ("main".to_string(), 1),
+                ]),
+            }),
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        render_compact_entry(&mut buf, &entry).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            out,
+            "root=inbox version=- (no-op; 1 entry retained by cross-root refs from main)\n"
+        );
     }
 }
