@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
 use crate::event::{Event, EventError, EVENT_KIND_ASSIGN};
 use crate::hash::Hash;
-use crate::ledger::LedgerError;
+use crate::ledger::{Ledger, LedgerError};
 
 /// `Event::kind` value for assign events. Namespaced under `kin::` so
 /// assign events pass the same kind-validation as store events while
@@ -101,20 +102,49 @@ impl AssignEvent {
     /// future validator might check still holds; assign events carry no
     /// content blob, so the field is effectively a placeholder.
     pub fn to_event(&self) -> Event {
-        unimplemented!("AssignEvent::to_event — Phase A implementation pending")
+        let mut metadata = BTreeMap::new();
+        metadata.insert(META_TARGET_ROOT.to_owned(), self.target_root.clone());
+        Event {
+            event_kind: EVENT_KIND_ASSIGN.to_owned(),
+            kind: ASSIGN_KIND_TAG.to_owned(),
+            id: self.kino_id.clone(),
+            hash: self.kino_id.clone(),
+            parents: self.supersedes.clone(),
+            ts: self.ts.clone(),
+            author: self.author.clone(),
+            provenance: self.provenance.clone(),
+            metadata,
+        }
     }
 
     /// Parse a wire `Event` back into an `AssignEvent`. Errors if
     /// `event_kind != "assign"` or if the `kin::target_root` metadata key
     /// is missing.
-    pub fn from_event(_e: &Event) -> Result<Self, AssignError> {
-        unimplemented!("AssignEvent::from_event — Phase A implementation pending")
+    pub fn from_event(e: &Event) -> Result<Self, AssignError> {
+        if e.event_kind != EVENT_KIND_ASSIGN {
+            return Err(AssignError::NotAssignEvent {
+                event_kind: e.event_kind.clone(),
+            });
+        }
+        let target_root = e
+            .metadata
+            .get(META_TARGET_ROOT)
+            .ok_or(AssignError::MissingTargetRoot)?
+            .clone();
+        Ok(AssignEvent {
+            kino_id: e.id.clone(),
+            target_root,
+            supersedes: e.parents.clone(),
+            author: e.author.clone(),
+            ts: e.ts.clone(),
+            provenance: e.provenance.clone(),
+        })
     }
 
     /// BLAKE3 of this assign event's canonical JSON line (via `to_event()`).
     /// Same content-addressing discipline as `Event::event_hash()`.
     pub fn event_hash(&self) -> Result<Hash, AssignError> {
-        unimplemented!("AssignEvent::event_hash — Phase A implementation pending")
+        Ok(self.to_event().event_hash()?)
     }
 }
 
@@ -123,17 +153,24 @@ impl AssignEvent {
 /// not exist before this call. Idempotent: re-writing the same logical
 /// assign event is a no-op.
 pub fn write_assign(
-    _kinora_root: &Path,
-    _a: &AssignEvent,
+    kinora_root: &Path,
+    a: &AssignEvent,
 ) -> Result<(Hash, bool), AssignError> {
-    unimplemented!("write_assign — Phase A implementation pending")
+    if a.kino_id.is_empty() {
+        return Err(AssignError::EmptyKinoId);
+    }
+    if a.target_root.is_empty() {
+        return Err(AssignError::EmptyTargetRoot);
+    }
+    let ledger = Ledger::new(kinora_root);
+    ledger.ensure_layout()?;
+    let event = a.to_event();
+    Ok(ledger.write_event(&event)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use crate::ledger::Ledger;
     use tempfile::TempDir;
 
     fn sample() -> AssignEvent {
