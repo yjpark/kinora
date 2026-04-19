@@ -72,6 +72,28 @@ pub fn validate_metadata_key(key: &str) -> Result<(), NamespaceError> {
     }
 }
 
+/// Extension to append when writing a blob of the given `kind`, for UX
+/// parity with the underlying content. Extensionless blobs are legacy and
+/// still readable via [`crate::paths::find_blob_path`] — the extension is
+/// advisory, not a key.
+///
+/// Returns `None` for kinds that should stay extensionless on disk (`binary`
+/// today; bare opaque bytes). Namespaced kinds fall back to `bin` — the
+/// store can't know the real extension, and `bin` is a neutral signal that
+/// the byte stream shape is up to the owning namespace.
+pub fn ext_for_kind(kind: &str) -> Option<&'static str> {
+    if is_namespaced(kind) {
+        return Some("bin");
+    }
+    match kind {
+        "markdown" => Some("md"),
+        "text" => Some("txt"),
+        "kinograph" => Some("styx"),
+        "binary" => None,
+        _ => None,
+    }
+}
+
 pub fn validate_kind(kind: &str) -> Result<(), NamespaceError> {
     if is_namespaced(kind) {
         validate_namespaced(kind)
@@ -142,5 +164,24 @@ mod tests {
     fn is_namespaced_detects_separator() {
         assert!(!is_namespaced("name"));
         assert!(is_namespaced("kudo::diagram"));
+    }
+
+    #[test]
+    fn ext_for_kind_maps_reserved_kinds() {
+        assert_eq!(ext_for_kind("markdown"), Some("md"));
+        assert_eq!(ext_for_kind("text"), Some("txt"));
+        assert_eq!(ext_for_kind("kinograph"), Some("styx"));
+        assert_eq!(ext_for_kind("binary"), None);
+    }
+
+    #[test]
+    fn ext_for_kind_falls_back_to_bin_for_namespaced() {
+        assert_eq!(ext_for_kind("team::priority"), Some("bin"));
+        assert_eq!(ext_for_kind("kudo::diagram"), Some("bin"));
+    }
+
+    #[test]
+    fn ext_for_kind_unknown_bare_returns_none() {
+        assert_eq!(ext_for_kind("random"), None);
     }
 }
