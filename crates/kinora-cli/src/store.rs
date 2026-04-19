@@ -98,7 +98,14 @@ pub fn run_store(cwd: &Path, args: StoreRunArgs) -> Result<StoredKino, CliError>
 /// Write `assign` as the second half of a `kinora store --root` pair.
 /// On failure, best-effort deletes the store event's hot file iff this
 /// call introduced it (stored.was_new_lineage), preserving the atomic-pair
-/// invariant — "both events land, or neither does".
+/// invariant at the event layer: after rollback there's no orphan store
+/// event claiming a root that never received a matching assign.
+///
+/// Note: `store_kino` also writes a content blob under `.kinora/store/`.
+/// A blob introduced by this call is intentionally NOT rolled back — the
+/// store is content-addressed and dedup-safe, so a leaked blob is benign
+/// and will be reaped by the GC pass (hxmw-6). The on-disk event set
+/// stays consistent, which is what "atomic pair" means for the ledger.
 fn pair_assign_with_rollback(
     kin_root: &Path,
     stored: &StoredKino,

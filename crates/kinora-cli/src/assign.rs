@@ -174,28 +174,15 @@ mod tests {
     }
 
     #[test]
-    fn assign_is_idempotent_on_identical_inputs() {
+    fn write_assign_is_idempotent_on_identical_inputs() {
+        // `run_assign` itself can't be used to prove idempotency because it
+        // stamps `ts` from `jiff::Timestamp::now()`, so two back-to-back calls
+        // produce different event hashes. Confirm the CLI-resolved kino_id
+        // round-trips into a stable assign event by calling the library twice
+        // with a fixed ts.
         let tmp = repo();
         seed_kino(&tmp, b"x", "doc");
 
-        let args1 = AssignRunArgs {
-            kino: "doc".into(),
-            root: "main".into(),
-            resolves: None,
-            author: Some("YJ".into()),
-            provenance: Some("test".into()),
-        };
-        let args2 = AssignRunArgs {
-            kino: "doc".into(),
-            root: "main".into(),
-            resolves: None,
-            author: Some("YJ".into()),
-            provenance: Some("test".into()),
-        };
-
-        // Fix ts by constructing the assign directly — run_assign uses now(),
-        // so two back-to-back calls don't dedup. This test instead writes
-        // via the library with a fixed ts to confirm library-level idempotency.
         let a = AssignEvent {
             kino_id: seed_kino_id(&tmp, "doc"),
             target_root: "main".into(),
@@ -209,7 +196,6 @@ mod tests {
         assert_eq!(h1, h2);
         assert!(new1);
         assert!(!new2);
-        let _ = (args1, args2);
     }
 
     fn seed_kino_id(tmp: &TempDir, name: &str) -> String {
