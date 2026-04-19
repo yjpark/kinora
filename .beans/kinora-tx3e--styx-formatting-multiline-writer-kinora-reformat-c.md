@@ -1,11 +1,11 @@
 ---
 # kinora-tx3e
 title: 'Styx formatting: multiline writer + kinora reformat command'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-19T15:12:02Z
-updated_at: 2026-04-19T19:10:27Z
+updated_at: 2026-04-19T19:15:31Z
 blocked_by:
     - kinora-jezf
 ---
@@ -220,3 +220,22 @@ YAGNI today — kinograph has only ever been `{ entries: Vec<Entry> }`. If we ev
 - After `kinora commit`, reformatted kinos are heads; `kinora render` shows unchanged user-visible output
 - Idempotent on already-styxl repos (zero staged events)
 - Zero compiler warnings, all tests pass
+
+## Summary of Changes
+
+Completed via the four-commit sequence:
+
+1. `f3b749d test(kinograph,root): spec styxl one-entry-per-line format` — specs Kinograph/RootKinograph styxl serialization semantics
+2. `5aa12b3 feat(kinograph,root): write blobs in styxl one-entry-per-line form` — to_styxl / parse_styxl / is_styxl + kind→extension routing to `.styxl`
+3. `b4aedea test(reformat): spec library reformat semantics for styxl migration` — 7 library tests covering legacy→styxl migration, idempotency, root pointer rewrites, composition-entry recursion, and the commit-makes-it-head round-trip
+4. `654e020 feat(reformat): walk reachable kinos and stage styxl versions` — `kinora::reformat::reformat_repo()` implementation
+5. `6752d08 feat(cli): add kinora reformat command` — `kinora reformat` subcommand with author/provenance defaults mirroring `kinora commit`
+6. `3bc7643 fix(reformat): review follow-ups — NoHead variant, UTF-8 guard, hoisted ledger read` — clippy and robustness fixes surfaced by code review
+
+### Key design decisions made during implementation
+
+- **Root rewrites route through `store_kino(kind: "root", id: Some(prior_id), parents: [prior_hash])`** — not a direct blob+pointer bypass. This mirrors the shape commit itself uses on a regular version bump, so the event-graph linkage stays intact; the next `kinora commit` can still find the prior event via `events.iter().find(|e| e.hash == prior.as_hex())`.
+- **Two idempotency guards**: first `is_styxl(text)` fast path (cheap, no parse), then `new_bytes == content` byte-equality check after reserialization (covers rare cases where legacy parser accepts input but reserializes identically).
+- **UTF-8 guard falls through to parse on decode failure** rather than silently counting as already-formatted. A non-UTF8 blob surfaces as a proper `Kinograph::parse` / `RootKinograph::parse` error.
+- **Graph walk is rooted in each root pointer's entries + recurses into composition entries**; a `HashSet<String>` prevents cycles. Only `kind == "kinograph"` entries are pushed onto the work queue — markdown/text/binary leaves are never visited.
+- **CLI summary conditionally suggests `kinora commit`** only when kinograph versions were staged. Root rewrites land directly on disk (pointer updated atomically via `rename`), so they need no commit to surface.
