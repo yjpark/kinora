@@ -110,29 +110,40 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Compact { root, author, provenance } => {
-            let args = CompactRunArgs { root, author, provenance };
+        Command::Compact { author, provenance } => {
+            let args = CompactRunArgs { author, provenance };
             match run_compact(&cwd, args) {
-                Ok(result) => {
-                    match result.new_version {
-                        Some(h) => println!(
-                            "root={} version={} (new version)",
-                            result.root_name,
-                            h.shorthash(),
-                        ),
-                        None => {
-                            let version_str = result
-                                .prior_version
-                                .as_ref()
-                                .map(|h| h.shorthash().to_owned())
-                                .unwrap_or_else(|| "-".into());
-                            println!(
-                                "root={} version={} (no-op)",
-                                result.root_name, version_str,
-                            );
+                Ok(report) => {
+                    for (name, result) in &report.per_root {
+                        match result {
+                            Ok(r) => match &r.new_version {
+                                Some(h) => println!(
+                                    "root={} version={} (new version)",
+                                    name,
+                                    h.shorthash(),
+                                ),
+                                None => {
+                                    let version_str = r
+                                        .prior_version
+                                        .as_ref()
+                                        .map(|h| h.shorthash().to_owned())
+                                        .unwrap_or_else(|| "-".into());
+                                    println!(
+                                        "root={} version={} (no-op)",
+                                        name, version_str,
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                println!("root={} ERROR: {}", name, e);
+                            }
                         }
                     }
-                    ExitCode::SUCCESS
+                    if report.any_error() {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
                 }
                 Err(e) => {
                     eprintln!("error: {e}");

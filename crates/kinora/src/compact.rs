@@ -1,13 +1,19 @@
 //! Compaction: promote hot-ledger events into a `root` kinograph version.
 //!
-//! `compact(kinora_root, root_name, …)` reads every event under
+//! `compact_root(kinora_root, root_name, …)` reads every event under
 //! `.kinora/hot/`, picks the head version of each identity, and emits a
 //! canonical `root`-kind kinograph whose entries inline the leaf view of
 //! each owned kino. The blob is stored and `.kinora/roots/<name>` is
 //! atomically rewritten to point at it.
 //!
-//! Determinism: two independent devs running `compact` over the same hot
-//! event set produce byte-identical root blobs.
+//! `compact_all(kinora_root, …)` is the batch driver: loads `config.styx`,
+//! iterates every declared root in name order, and calls `compact_root`
+//! per-root. Per-root failures don't short-circuit — clean roots still
+//! advance to disk. Only a config read/parse failure surfaces as the
+//! outer `Err`.
+//!
+//! Determinism: two independent devs running `compact_root` over the
+//! same hot event set produce byte-identical root blobs.
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -16,11 +22,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::config::{Config, ConfigError};
 use crate::event::{Event, EventError};
 use crate::hash::{Hash, HashParseError};
 use crate::kino::{store_kino, StoreKinoError, StoreKinoParams};
 use crate::ledger::{Ledger, LedgerError};
-use crate::paths::{root_pointer_path, roots_dir};
+use crate::paths::{config_path, root_pointer_path, roots_dir};
 use crate::root::{RootEntry, RootError, RootKinograph};
 use crate::store::{ContentStore, StoreError};
 
@@ -32,6 +39,7 @@ pub enum CompactError {
     Event(EventError),
     Root(RootError),
     StoreKino(StoreKinoError),
+    Config(ConfigError),
     InvalidHash { value: String, err: HashParseError },
     MultipleHeads { id: String, heads: Vec<String> },
     NoHead { id: String },
@@ -49,6 +57,7 @@ impl std::fmt::Display for CompactError {
             CompactError::Event(e) => write!(f, "{e}"),
             CompactError::Root(e) => write!(f, "{e}"),
             CompactError::StoreKino(e) => write!(f, "{e}"),
+            CompactError::Config(e) => write!(f, "{e}"),
             CompactError::InvalidHash { value, err } => {
                 write!(f, "invalid hash `{value}`: {err}")
             }
@@ -114,6 +123,12 @@ impl From<RootError> for CompactError {
 impl From<StoreKinoError> for CompactError {
     fn from(e: StoreKinoError) -> Self {
         CompactError::StoreKino(e)
+    }
+}
+
+impl From<ConfigError> for CompactError {
+    fn from(e: ConfigError) -> Self {
+        CompactError::Config(e)
     }
 }
 
@@ -257,7 +272,7 @@ fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CompactErr
 /// No-op: returns `new_version = None` when either
 ///  - no prior pointer exists AND there are no hot events to promote, or
 ///  - a prior pointer exists AND the fresh canonical bytes match it.
-pub fn compact(
+pub fn compact_root(
     kinora_root: &Path,
     root_name: &str,
     params: CompactParams,
@@ -329,6 +344,38 @@ pub fn compact(
     })
 }
 
+/// One entry in the batch report produced by `compact_all`.
+///
+/// The outer tuple pairs the root's declared name with the per-root
+/// outcome. A per-root `Err` surfaces the specific failure (e.g. a fork
+/// on one root) without aborting the batch.
+pub type CompactAllEntry = (String, Result<CompactResult, CompactError>);
+
+/// Compact every root declared in `config.styx`, in name order.
+///
+/// Reads the config once, then calls `compact_root` per declared root.
+/// Per-root errors are collected into the returned `Vec` — they don't
+/// short-circuit the batch, so clean roots still advance to disk even
+/// when a sibling root is in a failing state (e.g. a fork).
+///
+/// The outer `Result::Err` is reserved for pre-iteration failures:
+/// config file missing, unreadable, or unparseable.
+pub fn compact_all(
+    kinora_root: &Path,
+    params: CompactParams,
+) -> Result<Vec<CompactAllEntry>, CompactError> {
+    let cfg_path = config_path(kinora_root);
+    let cfg_text = fs::read_to_string(&cfg_path)?;
+    let config = Config::from_styx(&cfg_text)?;
+
+    let mut out: Vec<CompactAllEntry> = Vec::with_capacity(config.roots.len());
+    for name in config.roots.keys() {
+        let result = compact_root(kinora_root, name, params.clone());
+        out.push((name.clone(), result));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,7 +424,7 @@ mod tests {
         store_md(&root, b"b", "b", "2026-04-19T10:00:01Z");
 
         let result =
-            compact(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+            compact_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
         let hash = result.new_version.expect("new version on genesis");
         assert!(result.prior_version.is_none());
 
@@ -393,14 +440,14 @@ mod tests {
         let (_t, root) = setup();
         store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
 
-        let first = compact(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
+        let first = compact_root(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let prior = first.new_version.unwrap();
 
         // Add a second kino so the second root differs.
         store_md(&root, b"second", "other", "2026-04-19T10:00:02Z");
 
-        let second = compact(&root, "main", params("yj", "2026-04-19T10:00:03Z"))
+        let second = compact_root(&root, "main", params("yj", "2026-04-19T10:00:03Z"))
             .unwrap();
         assert_eq!(second.prior_version.as_ref(), Some(&prior));
         let new = second.new_version.expect("new version after update");
@@ -424,14 +471,14 @@ mod tests {
     fn compact_is_no_op_when_nothing_new() {
         let (_t, root) = setup();
         store_md(&root, b"one", "only", "2026-04-19T10:00:00Z");
-        let first = compact(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
+        let first = compact_root(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let first_version = first.new_version.unwrap();
 
         let pointer_before = fs::read(root_pointer_path(&root, "main")).unwrap();
 
         // No new user events; different ts on the compact itself.
-        let second = compact(&root, "main", params("yj", "2026-04-19T10:05:00Z"))
+        let second = compact_root(&root, "main", params("yj", "2026-04-19T10:05:00Z"))
             .unwrap();
         assert!(second.new_version.is_none(), "should be no-op");
         assert_eq!(second.prior_version.unwrap(), first_version);
@@ -462,7 +509,7 @@ mod tests {
         };
         Ledger::new(&root).write_event(&forged).unwrap();
 
-        let result = compact(&root, "main", params("yj", "2026-04-19T10:00:05Z"))
+        let result = compact_root(&root, "main", params("yj", "2026-04-19T10:00:05Z"))
             .unwrap();
         let hash = result.new_version.expect("expected compaction to succeed");
         let bytes = ContentStore::new(&root).read(&hash).unwrap();
@@ -476,7 +523,7 @@ mod tests {
     #[test]
     fn compact_with_no_events_and_no_prior_is_no_op() {
         let (_t, root) = setup();
-        let result = compact(&root, "main", params("yj", "2026-04-19T10:00:00Z"))
+        let result = compact_root(&root, "main", params("yj", "2026-04-19T10:00:00Z"))
             .unwrap();
         assert!(result.new_version.is_none());
         assert!(result.prior_version.is_none());
@@ -497,14 +544,14 @@ mod tests {
         let (_t1, root1) = setup();
         mk(&root1);
         let r1 =
-            compact(&root1, "main", params("alice", "2026-04-19T10:00:03Z"))
+            compact_root(&root1, "main", params("alice", "2026-04-19T10:00:03Z"))
                 .unwrap()
                 .new_version
                 .unwrap();
 
         let (_t2, root2) = setup();
         mk(&root2);
-        let r2 = compact(
+        let r2 = compact_root(
             &root2,
             "main",
             CompactParams {
@@ -530,7 +577,7 @@ mod tests {
         let b = store_md(&root, b"bb", "n2", "2026-04-19T10:00:01Z");
         let c = store_md(&root, b"cc", "n3", "2026-04-19T10:00:02Z");
 
-        let result = compact(&root, "main", params("yj", "2026-04-19T10:00:10Z"))
+        let result = compact_root(&root, "main", params("yj", "2026-04-19T10:00:10Z"))
             .unwrap();
         let blob = ContentStore::new(&root)
             .read(&result.new_version.unwrap())
@@ -546,7 +593,7 @@ mod tests {
     fn pointer_file_is_exactly_64_hex_no_trailing_whitespace() {
         let (_t, root) = setup();
         store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
-        let result = compact(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
+        let result = compact_root(&root, "main", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let hash = result.new_version.unwrap();
         let pointer = fs::read_to_string(root_pointer_path(&root, "main")).unwrap();
@@ -568,7 +615,7 @@ mod tests {
         let b = store_md(&root, b"b", "b", "2026-04-19T10:00:01Z");
         let c = store_md(&root, b"c", "c", "2026-04-19T10:00:02Z");
 
-        let first = compact(&root, "main", params("yj", "2026-04-19T10:00:03Z"))
+        let first = compact_root(&root, "main", params("yj", "2026-04-19T10:00:03Z"))
             .unwrap();
         let first_blob = ContentStore::new(&root)
             .read(&first.new_version.unwrap())
@@ -592,7 +639,7 @@ mod tests {
         )
         .unwrap();
 
-        let second = compact(&root, "main", params("yj", "2026-04-19T10:00:11Z"))
+        let second = compact_root(&root, "main", params("yj", "2026-04-19T10:00:11Z"))
             .unwrap();
         let second_blob = ContentStore::new(&root)
             .read(&second.new_version.unwrap())
@@ -652,7 +699,7 @@ mod tests {
         let (_t, root) = setup();
         for name in ["", ".", "..", "a/b", "dir/sub", "back\\slash"] {
             let err =
-                compact(&root, name, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+                compact_root(&root, name, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
             assert!(
                 matches!(err, CompactError::InvalidRootName { .. }),
                 "name {name:?} not rejected: {err:?}"
@@ -711,7 +758,124 @@ mod tests {
         }
 
         let err =
-            compact(&root, "main", params("yj", "2026-04-19T10:00:10Z")).unwrap_err();
+            compact_root(&root, "main", params("yj", "2026-04-19T10:00:10Z")).unwrap_err();
         assert!(matches!(err, CompactError::MultipleHeads { .. }), "got: {err:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // compact_all (batch driver)
+    // ------------------------------------------------------------------
+
+    fn write_config(kin_root: &Path, body: &str) {
+        fs::write(config_path(kin_root), body).unwrap();
+    }
+
+    #[test]
+    fn compact_all_iterates_every_declared_root_in_name_order() {
+        let (_t, root) = setup();
+        // init writes a config with just `inbox`. Overwrite with three roots
+        // listed out of alphabetical order in the file — compact_all should
+        // normalize to sorted order.
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  zeta { policy "never" }
+  alpha { policy "never" }
+  main { policy "never" }
+}
+"#,
+        );
+
+        store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
+
+        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
+        let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
+        // `inbox` is auto-provisioned by Config::from_styx when absent.
+        assert_eq!(names, vec!["alpha", "inbox", "main", "zeta"]);
+        assert!(
+            entries.iter().all(|(_, r)| r.is_ok()),
+            "every root should have compacted cleanly: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn compact_all_per_root_errors_do_not_short_circuit_clean_roots() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+  forked { policy "never" }
+  clean { policy "never" }
+}
+"#,
+        );
+
+        // Pre-populate `forked`'s pointer with a hash that isn't in the
+        // content store — compact_root will fail to read the prior blob
+        // for byte-comparison. main and clean are untouched and must
+        // still advance to disk.
+        fs::create_dir_all(roots_dir(&root)).unwrap();
+        let bogus_hash = "ff".repeat(32);
+        fs::write(root_pointer_path(&root, "forked"), &bogus_hash).unwrap();
+
+        store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
+
+        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
+        let by_name: std::collections::HashMap<_, _> = entries
+            .iter()
+            .map(|(n, r)| (n.clone(), r))
+            .collect();
+
+        assert!(by_name["main"].is_ok(), "main: {:?}", by_name["main"]);
+        assert!(by_name["clean"].is_ok(), "clean: {:?}", by_name["clean"]);
+        assert!(
+            by_name["forked"].is_err(),
+            "forked should surface as Err: {:?}",
+            by_name["forked"]
+        );
+
+        // main pointer advanced to disk despite the sibling failure.
+        assert!(root_pointer_path(&root, "main").is_file());
+        assert!(root_pointer_path(&root, "clean").is_file());
+    }
+
+    #[test]
+    fn compact_all_surfaces_config_errors_as_outer_err() {
+        let (_t, root) = setup();
+        // Overwrite with an unparseable config.
+        write_config(&root, "this is not valid styx {{{");
+        let err = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+        assert!(
+            matches!(err, CompactError::Config(_)),
+            "config parse failure should be outer Err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compact_all_surfaces_missing_config_as_outer_err() {
+        let (_t, root) = setup();
+        fs::remove_file(config_path(&root)).unwrap();
+        let err = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+        assert!(
+            matches!(err, CompactError::Io(_)),
+            "missing config.styx should be outer Err: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compact_all_emits_no_op_entry_when_root_has_nothing_to_promote() {
+        // Default init config has only `inbox`. No hot events → compact_all
+        // should still visit inbox and emit a no-op entry.
+        let (_t, root) = setup();
+        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        assert_eq!(entries.len(), 1);
+        let (name, result) = &entries[0];
+        assert_eq!(name, "inbox");
+        let res = result.as_ref().unwrap();
+        assert!(res.new_version.is_none());
+        assert!(res.prior_version.is_none());
     }
 }

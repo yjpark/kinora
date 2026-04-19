@@ -127,7 +127,7 @@ fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kinora::compact::{compact, CompactParams};
+    use kinora::compact::{compact_root, CompactParams};
     use kinora::init::init;
     use kinora::kino::{store_kino, StoreKinoParams};
     use std::collections::BTreeMap;
@@ -270,7 +270,7 @@ mod tests {
         let tmp = repo();
         let kin = kinora_root(tmp.path());
         store_kino(&kin, params(b"alpha", "alpha")).unwrap();
-        compact(&kin, "main", compact_params()).unwrap();
+        compact_root(&kin, "main", compact_params()).unwrap();
 
         // Simulate a leftover tmp pointer and a stray subdir under roots/.
         let roots = kin.join("roots");
@@ -290,7 +290,7 @@ mod tests {
         let ev1 = store_kino(&kin, params(b"alpha", "alpha")).unwrap();
         let ev2 = store_kino(&kin, params(b"beta", "beta")).unwrap();
 
-        compact(&kin, "main", compact_params()).unwrap();
+        compact_root(&kin, "main", compact_params()).unwrap();
 
         let owners = build_owners_map(&kin).unwrap();
         assert_eq!(owners.get(&ev1.event.id).map(String::as_str), Some("main"));
@@ -324,7 +324,7 @@ mod tests {
         let kin = kinora_root(tmp.path());
         store_kino(&kin, params(b"# a\n", "alpha")).unwrap();
         store_kino(&kin, params(b"# b\n", "beta")).unwrap();
-        compact(&kin, "main", compact_params()).unwrap();
+        compact_root(&kin, "main", compact_params()).unwrap();
 
         let cache = TempDir::new().unwrap();
         let args = RenderRunArgs {
@@ -342,7 +342,7 @@ mod tests {
         let kin = kinora_root(tmp.path());
         store_kino(&kin, params(b"# a\n", "alpha")).unwrap();
         store_kino(&kin, params(b"# b\n", "beta")).unwrap();
-        compact(&kin, "main", compact_params()).unwrap();
+        compact_root(&kin, "main", compact_params()).unwrap();
 
         // Add a post-compact kino that isn't owned by any root yet.
         store_kino(&kin, params(b"# c\n", "gamma")).unwrap();

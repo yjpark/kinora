@@ -117,15 +117,14 @@ pub enum Command {
         all_heads: bool,
     },
 
-    /// Promote hot-ledger events into a named root kinograph version.
-    /// Reads every event under `.kinora/hot/`, picks the head per identity,
-    /// and stores a canonical `kind: root` blob, updating the pointer at
-    /// `.kinora/roots/<name>`.
+    /// Compact every root declared in `.kinora/config.styx` into a new
+    /// `kind: root` kinograph version. Reads every event under
+    /// `.kinora/hot/`, picks the head per identity per root, and stores
+    /// a canonical root blob per root, updating the pointer at
+    /// `.kinora/roots/<name>`. Per-root errors don't short-circuit
+    /// sibling roots — clean roots still advance. Exit is non-zero iff
+    /// any root errored.
     Compact {
-        /// Root name to compact into. Defaults to `main`.
-        #[facet(args::named, default)]
-        root: Option<String>,
-
         /// Override author (defaults to `user.name` from git config).
         #[facet(args::named, default)]
         author: Option<String>,
