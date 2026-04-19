@@ -1,11 +1,11 @@
 ---
 # kinora-c48l
 title: 'Phase 3.1: config roots {} block + inbox auto-provision'
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-04-19T10:16:24Z
-updated_at: 2026-04-19T10:53:28Z
+updated_at: 2026-04-19T10:56:41Z
 parent: kinora-hxmw
 ---
 
@@ -67,3 +67,27 @@ After parsing, `from_styx` checks whether `roots` contains `"inbox"` and inserts
 1. **Tests commit**: stub `Config` with the new `roots` field but empty logic (always empty map, no inbox injection). Add every new test; confirm failures are assertion-based.
 2. **Implementation commit**: RawConfig two-layer parse, policy grammar, inbox auto-provision. All tests pass; zero warnings.
 3. **Review commit** (if needed): fixes from subagent review.
+
+## Summary of Changes
+
+Landed the config primitive for named roots that downstream hxmw children (assign/compact/GC) will consume.
+
+### Code
+
+- `crates/kinora/src/config.rs`: new `RootPolicy` enum (`Never`, `MaxAge(String)`, `KeepLastN(usize)`) with case-sensitive string grammar: `"never"`, `"keep-last-<N>"` (all-ascii-digit N), `<digits><unit>` where unit ∈ [smhdwy]. `Config` gains `roots: BTreeMap<String, RootPolicy>`. Two-layer parse: facet-derived `RawConfig`/`RawRootBlock` → validated `Config`. `from_styx` auto-provisions `inbox → MaxAge("30d")` if absent; `to_styx` always emits the `roots {}` block so output round-trips.
+- `crates/kinora/src/init.rs`: constructs `Config` with explicit `inbox` root so `kinora init` writes a visible `roots { inbox { policy "30d" } }` block on day 1.
+- New `ConfigError::InvalidPolicy { root, raw }` reports the offending root and input string.
+
+### Tests
+
+13 config tests covering policy grammar (accepts/rejects), `from_styx` parsing of single and multi-root configs, inbox auto-provision (absent block + block-without-inbox + explicit-inbox-preserved), error reporting, and round-trip. Init tests cover the explicit inbox block in the initial config.styx. Full workspace still green (296 tests).
+
+### Deferred
+
+- Styx-layer duplicate root-name detection: BTreeMap in the facet-derive chain collapses dupes silently; detection needs a hand-written visitor. Noted as follow-up; low priority since users rarely hand-edit the styx.
+
+### Commits
+
+- eafa453 test(config): tests for roots block + RootPolicy + inbox auto-provision
+- 949776a feat(config): implement RootPolicy grammar + roots block parsing
+- 5aaaf55 fix(config): tighten policy grammar per review
