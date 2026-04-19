@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::event::{Event, EventError, EVENT_KIND_ASSIGN};
 use crate::hash::Hash;
@@ -37,10 +37,13 @@ pub struct AssignEvent {
 
 #[derive(Debug)]
 pub enum AssignError {
-    Io(io::Error),
     Ledger(LedgerError),
     Event(EventError),
+    KinoraMissing { path: PathBuf },
     NotAssignEvent { event_kind: String },
+    WrongKind { kind: String },
+    IdHashMismatch { id: String, hash: String },
+    InvalidHash { field: &'static str, value: String },
     MissingTargetRoot,
     EmptyTargetRoot,
     EmptyKinoId,
@@ -49,11 +52,23 @@ pub enum AssignError {
 impl std::fmt::Display for AssignError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AssignError::Io(e) => write!(f, "assign io error: {e}"),
             AssignError::Ledger(e) => write!(f, "{e}"),
             AssignError::Event(e) => write!(f, "{e}"),
+            AssignError::KinoraMissing { path } => {
+                write!(f, ".kinora/ not found at {}; run `kinora init` first", path.display())
+            }
             AssignError::NotAssignEvent { event_kind } => {
                 write!(f, "expected event_kind=\"{EVENT_KIND_ASSIGN}\", got {event_kind:?}")
+            }
+            AssignError::WrongKind { kind } => {
+                write!(f, "assign event kind must be `{ASSIGN_KIND_TAG}`, got {kind:?}")
+            }
+            AssignError::IdHashMismatch { id, hash } => write!(
+                f,
+                "assign event id must equal hash (kino_id placeholder); id={id}, hash={hash}"
+            ),
+            AssignError::InvalidHash { field, value } => {
+                write!(f, "assign event `{field}` is not a valid hex hash: {value}")
             }
             AssignError::MissingTargetRoot => {
                 write!(f, "assign event missing metadata key `{META_TARGET_ROOT}`")
@@ -65,12 +80,6 @@ impl std::fmt::Display for AssignError {
 }
 
 impl std::error::Error for AssignError {}
-
-impl From<io::Error> for AssignError {
-    fn from(e: io::Error) -> Self {
-        AssignError::Io(e)
-    }
-}
 
 impl From<LedgerError> for AssignError {
     fn from(e: LedgerError) -> Self {
@@ -117,15 +126,37 @@ impl AssignEvent {
         }
     }
 
-    /// Parse a wire `Event` back into an `AssignEvent`. Errors if
-    /// `event_kind != "assign"` or if the `kin::target_root` metadata key
-    /// is missing.
+    /// Parse a wire `Event` back into an `AssignEvent`. Enforces the
+    /// protocol invariants produced by `to_event`:
+    ///
+    /// - `event_kind == "assign"`
+    /// - `kind == "kin::assign"`
+    /// - `id == hash` (the shared kino_id placeholder)
+    /// - `id` parses as a hex hash
+    /// - metadata contains `kin::target_root`
+    ///
+    /// A nonconformant producer therefore surfaces as an explicit error
+    /// rather than silently round-tripping into a malformed `AssignEvent`.
+    /// Additional metadata entries beyond `kin::target_root` are dropped.
     pub fn from_event(e: &Event) -> Result<Self, AssignError> {
         if e.event_kind != EVENT_KIND_ASSIGN {
             return Err(AssignError::NotAssignEvent {
                 event_kind: e.event_kind.clone(),
             });
         }
+        if e.kind != ASSIGN_KIND_TAG {
+            return Err(AssignError::WrongKind { kind: e.kind.clone() });
+        }
+        if e.id != e.hash {
+            return Err(AssignError::IdHashMismatch {
+                id: e.id.clone(),
+                hash: e.hash.clone(),
+            });
+        }
+        Hash::from_str(&e.id).map_err(|_| AssignError::InvalidHash {
+            field: "kino_id",
+            value: e.id.clone(),
+        })?;
         let target_root = e
             .metadata
             .get(META_TARGET_ROOT)
@@ -152,15 +183,33 @@ impl AssignEvent {
 /// `(event_hash, was_new)` — `was_new` is true iff the target file did
 /// not exist before this call. Idempotent: re-writing the same logical
 /// assign event is a no-op.
+///
+/// Errors before any filesystem work if `kinora_root` does not already
+/// exist (parity with `store_kino`'s UX), if `kino_id` or `target_root`
+/// are empty, or if `kino_id` / any `supersedes` entry is not a valid
+/// hex hash.
 pub fn write_assign(
     kinora_root: &Path,
     a: &AssignEvent,
 ) -> Result<(Hash, bool), AssignError> {
+    if !kinora_root.exists() {
+        return Err(AssignError::KinoraMissing { path: kinora_root.to_path_buf() });
+    }
     if a.kino_id.is_empty() {
         return Err(AssignError::EmptyKinoId);
     }
     if a.target_root.is_empty() {
         return Err(AssignError::EmptyTargetRoot);
+    }
+    Hash::from_str(&a.kino_id).map_err(|_| AssignError::InvalidHash {
+        field: "kino_id",
+        value: a.kino_id.clone(),
+    })?;
+    for s in &a.supersedes {
+        Hash::from_str(s).map_err(|_| AssignError::InvalidHash {
+            field: "supersedes[]",
+            value: s.clone(),
+        })?;
     }
     let ledger = Ledger::new(kinora_root);
     ledger.ensure_layout()?;
@@ -171,6 +220,8 @@ pub fn write_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::init::init;
+    use crate::paths::kinora_root;
     use tempfile::TempDir;
 
     fn sample() -> AssignEvent {
@@ -183,6 +234,13 @@ mod tests {
             ts: "2026-04-19T10:00:00Z".into(),
             provenance: "test".into(),
         }
+    }
+
+    fn setup() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path(), "https://example.com/x.git").unwrap();
+        let root = kinora_root(tmp.path());
+        (tmp, root)
     }
 
     #[test]
@@ -300,22 +358,20 @@ mod tests {
 
     #[test]
     fn write_assign_creates_hot_event_file() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
+        let (_tmp, root) = setup();
         let a = sample();
-        let (h, was_new) = write_assign(&kinora_root, &a).unwrap();
+        let (h, was_new) = write_assign(&root, &a).unwrap();
         assert!(was_new);
-        let path = crate::paths::hot_event_path(&kinora_root, &h);
+        let path = crate::paths::hot_event_path(&root, &h);
         assert!(path.is_file(), "hot event file missing: {}", path.display());
     }
 
     #[test]
     fn write_assign_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
+        let (_tmp, root) = setup();
         let a = sample();
-        let (h1, new1) = write_assign(&kinora_root, &a).unwrap();
-        let (h2, new2) = write_assign(&kinora_root, &a).unwrap();
+        let (h1, new1) = write_assign(&root, &a).unwrap();
+        let (h2, new2) = write_assign(&root, &a).unwrap();
         assert_eq!(h1, h2);
         assert!(new1);
         assert!(!new2, "second write of identical assign must not be new");
@@ -323,32 +379,68 @@ mod tests {
 
     #[test]
     fn write_assign_rejects_empty_kino_id() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
+        let (_tmp, root) = setup();
         let mut a = sample();
         a.kino_id = String::new();
-        let err = write_assign(&kinora_root, &a).unwrap_err();
+        let err = write_assign(&root, &a).unwrap_err();
         assert!(matches!(err, AssignError::EmptyKinoId), "got {err:?}");
     }
 
     #[test]
     fn write_assign_rejects_empty_target_root() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
+        let (_tmp, root) = setup();
         let mut a = sample();
         a.target_root = String::new();
-        let err = write_assign(&kinora_root, &a).unwrap_err();
+        let err = write_assign(&root, &a).unwrap_err();
         assert!(matches!(err, AssignError::EmptyTargetRoot), "got {err:?}");
     }
 
     #[test]
-    fn write_assign_event_is_readable_via_ledger_read_all_events() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
-        let a = sample();
-        write_assign(&kinora_root, &a).unwrap();
+    fn write_assign_rejects_invalid_kino_id_hash() {
+        let (_tmp, root) = setup();
+        let mut a = sample();
+        a.kino_id = "not-a-hex-hash".into();
+        let err = write_assign(&root, &a).unwrap_err();
+        match err {
+            AssignError::InvalidHash { field, value } => {
+                assert_eq!(field, "kino_id");
+                assert_eq!(value, "not-a-hex-hash");
+            }
+            other => panic!("expected InvalidHash, got {other:?}"),
+        }
+    }
 
-        let events = Ledger::new(&kinora_root).read_all_events().unwrap();
+    #[test]
+    fn write_assign_rejects_invalid_supersedes_hash() {
+        let (_tmp, root) = setup();
+        let mut a = sample();
+        a.supersedes = vec!["garbage".into()];
+        let err = write_assign(&root, &a).unwrap_err();
+        match err {
+            AssignError::InvalidHash { field, value } => {
+                assert_eq!(field, "supersedes[]");
+                assert_eq!(value, "garbage");
+            }
+            other => panic!("expected InvalidHash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_assign_errors_when_kinora_missing() {
+        let tmp = TempDir::new().unwrap();
+        // No init — no .kinora/ directory.
+        let missing = tmp.path().join(".kinora");
+        let err = write_assign(&missing, &sample()).unwrap_err();
+        assert!(matches!(err, AssignError::KinoraMissing { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn write_assign_event_is_readable_via_ledger_read_all_events() {
+        let (_tmp, root) = setup();
+        let a = sample();
+        write_assign(&root, &a).unwrap();
+
+        let events = Ledger::new(&root).read_all_events().unwrap();
         assert_eq!(events.len(), 1);
         let e = &events[0];
         assert_eq!(e.event_kind, EVENT_KIND_ASSIGN);
@@ -360,17 +452,63 @@ mod tests {
 
     #[test]
     fn write_assign_different_kinos_produce_distinct_files() {
-        let tmp = TempDir::new().unwrap();
-        let kinora_root = tmp.path().join(".kinora");
+        let (_tmp, root) = setup();
         let a = sample();
         let mut b = sample();
         b.kino_id = Hash::of_content(b"other-kino").as_hex().to_owned();
 
-        let (ha, _) = write_assign(&kinora_root, &a).unwrap();
-        let (hb, _) = write_assign(&kinora_root, &b).unwrap();
+        let (ha, _) = write_assign(&root, &a).unwrap();
+        let (hb, _) = write_assign(&root, &b).unwrap();
         assert_ne!(ha, hb);
 
-        let events = Ledger::new(&kinora_root).read_all_events().unwrap();
+        let events = Ledger::new(&root).read_all_events().unwrap();
         assert_eq!(events.len(), 2);
+    }
+
+    // --- from_event strictness (review fixes) ---
+
+    #[test]
+    fn from_event_rejects_wrong_kind() {
+        let mut e = sample().to_event();
+        e.kind = "markdown".into();
+        let err = AssignEvent::from_event(&e).unwrap_err();
+        match err {
+            AssignError::WrongKind { kind } => assert_eq!(kind, "markdown"),
+            other => panic!("expected WrongKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_event_rejects_id_hash_mismatch() {
+        let mut e = sample().to_event();
+        e.hash = Hash::of_content(b"other").as_hex().into();
+        let err = AssignEvent::from_event(&e).unwrap_err();
+        assert!(matches!(err, AssignError::IdHashMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn from_event_rejects_invalid_kino_id_hash() {
+        let mut e = sample().to_event();
+        e.id = "not-a-hash".into();
+        e.hash = "not-a-hash".into();
+        let err = AssignEvent::from_event(&e).unwrap_err();
+        match err {
+            AssignError::InvalidHash { field, value } => {
+                assert_eq!(field, "kino_id");
+                assert_eq!(value, "not-a-hash");
+            }
+            other => panic!("expected InvalidHash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_event_drops_extra_metadata_keys() {
+        // Only `kin::target_root` is promoted back into the domain struct;
+        // any other metadata entries are dropped. Pins the round-trip
+        // "forget extras" semantics.
+        let mut e = sample().to_event();
+        e.metadata.insert("kin::extra".into(), "ignored".into());
+        let back = AssignEvent::from_event(&e).unwrap();
+        assert_eq!(back, sample());
     }
 }
