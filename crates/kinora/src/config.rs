@@ -3,8 +3,15 @@
 //! into the public `Config` type.
 //!
 //! Per-root policies (`Never`, `MaxAge(_)`, `KeepLastN(_)`) are declared
-//! in a `roots {}` block. `inbox` is auto-provisioned with a default
-//! `30d` policy when absent, per xi21 §6.
+//! in a `roots {}` block. Two roots are auto-provisioned by the library
+//! if the user hasn't declared them:
+//!
+//! - `inbox` — default `MaxAge("30d")` policy (per xi21 §6); nudges triage.
+//! - `commits` — default `Never` policy; holds per-commit archive kinos
+//!   so the staged ledger can be pruned without losing provenance.
+//!
+//! User-declared policies for these roots are preserved (never clobbered).
+//! Users cannot remove them — the library re-injects on load.
 
 use std::collections::BTreeMap;
 
@@ -145,6 +152,9 @@ impl Config {
         roots
             .entry("inbox".to_owned())
             .or_insert_with(|| RootPolicy::MaxAge(DEFAULT_INBOX_POLICY.to_owned()));
+        roots
+            .entry("commits".to_owned())
+            .or_insert(RootPolicy::Never);
         Ok(Self { repo_url: raw.repo_url, roots })
     }
 

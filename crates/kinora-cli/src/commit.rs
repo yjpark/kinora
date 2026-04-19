@@ -248,9 +248,10 @@ mod tests {
         assign_to(&kin, &b.id, "rfcs");
 
         let report = run_commit(tmp.path(), args()).unwrap();
-        // inbox is auto-provisioned in Config::from_styx when absent.
+        // `inbox` and `commits` are auto-provisioned in Config::from_styx
+        // when absent.
         let names: Vec<_> = report.per_root.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names, vec!["inbox", "main", "rfcs"]);
+        assert_eq!(names, vec!["commits", "inbox", "main", "rfcs"]);
         assert!(!report.any_error(), "expected all roots to succeed: {names:?}");
         assert!(kinora::paths::root_pointer_path(&kin, "main").is_file());
         assert!(kinora::paths::root_pointer_path(&kin, "rfcs").is_file());
@@ -284,14 +285,17 @@ mod tests {
     #[test]
     fn run_commit_no_op_line_when_nothing_to_promote() {
         let (tmp, _kin) = repo();
-        // Default config has only `inbox`, and no staged events → no-op.
+        // Default config has `inbox` and `commits` (both auto-provisioned),
+        // and no staged events → no-op for each.
         let report = run_commit(tmp.path(), args()).unwrap();
         assert!(!report.any_error());
-        assert_eq!(report.per_root.len(), 1);
-        let (name, result) = &report.per_root[0];
-        assert_eq!(name, "inbox");
-        let r = result.as_ref().unwrap();
-        assert!(r.new_version.is_none(), "no staged events → no new version");
+        assert_eq!(report.per_root.len(), 2);
+        let names: Vec<_> = report.per_root.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, vec!["commits", "inbox"]);
+        for (_name, result) in &report.per_root {
+            let r = result.as_ref().unwrap();
+            assert!(r.new_version.is_none(), "no staged events → no new version");
+        }
     }
 
     #[test]

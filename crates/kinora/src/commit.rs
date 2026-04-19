@@ -1480,8 +1480,9 @@ roots {
 
         let entries = commit_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
         let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
-        // `inbox` is auto-provisioned by Config::from_styx when absent.
-        assert_eq!(names, vec!["alpha", "inbox", "main", "zeta"]);
+        // `inbox` and `commits` are auto-provisioned by Config::from_styx
+        // when absent.
+        assert_eq!(names, vec!["alpha", "commits", "inbox", "main", "zeta"]);
         assert!(
             entries.iter().all(|(_, r)| r.is_ok()),
             "every root should have committed cleanly: {entries:?}"
@@ -1560,16 +1561,19 @@ roots {
 
     #[test]
     fn commit_all_emits_no_op_entry_when_root_has_nothing_to_promote() {
-        // Default init config has only `inbox`. No staged events → commit_all
-        // should still visit inbox and emit a no-op entry.
+        // Default init config has `inbox` and `commits` (both auto-provisioned).
+        // No staged events → commit_all should still visit each and emit no-op
+        // entries.
         let (_t, root) = setup();
         let entries = commit_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap();
-        assert_eq!(entries.len(), 1);
-        let (name, result) = &entries[0];
-        assert_eq!(name, "inbox");
-        let res = result.as_ref().unwrap();
-        assert!(res.new_version.is_none());
-        assert!(res.prior_version.is_none());
+        assert_eq!(entries.len(), 2);
+        let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, vec!["commits", "inbox"]);
+        for (_name, result) in &entries {
+            let res = result.as_ref().unwrap();
+            assert!(res.new_version.is_none());
+            assert!(res.prior_version.is_none());
+        }
     }
 
     // ------------------------------------------------------------------

@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T14:39:21Z
-updated_at: 2026-04-19T18:16:37Z
+updated_at: 2026-04-19T18:18:06Z
 blocked_by:
     - kinora-2t6l
 ---
@@ -128,7 +128,7 @@ Three phases, each TDD cycle (tests → impl → review fix). Complete 1 phase =
 ### Todos (replacing original)
 
 - [x] Phase A: config auto-provision tests
-- [ ] Phase A: config auto-provision impl
+- [x] Phase A: config auto-provision impl
 - [ ] Phase B: commit_archive module tests
 - [ ] Phase B: commit_archive module impl
 - [ ] Phase C: integration tests
