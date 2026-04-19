@@ -121,9 +121,13 @@ impl Event {
     }
 
     pub fn from_json_line(line: &str) -> Result<Self, EventError> {
-        // STUB (hxmw-szkl commit-1): no legacy fallback. Commit 2 adds the
-        // LegacyEvent branch so pre-phase-3 hot files parse as store events.
-        facet_json::from_str(line).map_err(|e| EventError::Parse(e.to_string()))
+        match facet_json::from_str::<Self>(line) {
+            Ok(e) => Ok(e),
+            Err(primary) => match facet_json::from_str::<LegacyEvent>(line) {
+                Ok(legacy) => Ok(Event::from(legacy)),
+                Err(_) => Err(EventError::Parse(primary.to_string())),
+            },
+        }
     }
 
     pub fn is_birth(&self) -> bool {

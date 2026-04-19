@@ -204,6 +204,9 @@ fn write_root_pointer(
 pub fn build_root(events: &[Event]) -> Result<RootKinograph, CompactError> {
     let mut by_id: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
     for e in events {
+        if !e.is_store_event() {
+            continue;
+        }
         if e.kind == "root" {
             continue;
         }

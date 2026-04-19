@@ -132,6 +132,9 @@ impl Resolver {
         // forks disambiguated by HEAD.
         for (lineage, events) in ledger.read_all_lineages()? {
             for event in events {
+                if !event.is_store_event() {
+                    continue;
+                }
                 let eh = event.event_hash().map_err(LedgerError::from)?;
                 if !seen.insert(eh.as_hex().to_owned()) {
                     continue;
@@ -146,6 +149,9 @@ impl Resolver {
         // Hot layout: one file per event. Per-event lineage label = event
         // hash shorthash.
         for event in ledger.read_all_events()? {
+            if !event.is_store_event() {
+                continue;
+            }
             let eh = event.event_hash().map_err(LedgerError::from)?;
             if !seen.insert(eh.as_hex().to_owned()) {
                 continue;
