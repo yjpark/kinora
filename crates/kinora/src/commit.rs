@@ -767,9 +767,11 @@ fn collect_owned_staged_events<'e>(
     let mut owned: Vec<&Event> = Vec::new();
     for e in events {
         if e.event_kind == EVENT_KIND_ASSIGN {
-            if let Ok(a) = AssignEvent::from_event(e)
-                && a.target_root == root_name
-            {
+            // `collect_live_assigns` above already parsed every assign,
+            // so any malformed one would have surfaced there — match its
+            // `?` style instead of silently dropping.
+            let a = AssignEvent::from_event(e)?;
+            if a.target_root == root_name {
                 owned.push(e);
             }
             continue;
@@ -802,6 +804,12 @@ fn maybe_archive_owned_events(
     declared_roots: &BTreeSet<String>,
     params: &CommitParams,
 ) -> Result<Option<String>, CommitError> {
+    // The caller only invokes us after a real version bump, so in the
+    // happy path `owned_refs` is always non-empty. This guard is a
+    // crash-recovery safety net: if a prior run wrote the pointer but
+    // died before staging the archive, a replay against an already-clean
+    // ledger (staged events consumed by GC) would find nothing to archive
+    // and must bail cleanly rather than write a zero-event archive.
     let owned_refs = collect_owned_staged_events(events, root_name, declared_roots)?;
     if owned_refs.is_empty() {
         return Ok(None);
@@ -828,9 +836,11 @@ fn maybe_archive_owned_events(
     let archive_id = stored.event.id.clone();
 
     // Skip writing a new assign if a live one already targets commits for
-    // this archive kino — otherwise re-running commit with the same state
-    // at a different timestamp would pile up redundant live assigns and
-    // trigger AmbiguousAssign later.
+    // this archive kino. Same crash-recovery safety net as above: in the
+    // happy path the archive kino we just stored is new, so no live assign
+    // can exist yet. If a prior run wrote the archive store but crashed
+    // before the assign, this guard lets the replay pick up where it left
+    // off without duplicating the assign (which would trip AmbiguousAssign).
     let already_assigned = events.iter().any(|e| {
         if e.event_kind != EVENT_KIND_ASSIGN {
             return false;
@@ -2990,6 +3000,76 @@ roots {
             vec![archive_id],
             "commits kinograph should list only the archive kino",
         );
+    }
+
+    #[test]
+    fn successive_commits_with_new_activity_stack_distinct_archives() {
+        // Opposite of the idempotency case: run 1 commits one kino, run 2
+        // stores and commits a second kino. Each run produces its own
+        // archive (different contents → different hashes → two live
+        // assigns into commits), and the commits kinograph lists both.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+
+        let k1 = store_md(&root, b"one", "one", "2026-04-19T10:00:00Z");
+        write_assign_for(&root, &k1.id, "main", vec![], "2026-04-19T10:00:01Z");
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // Second round: new user activity in main.
+        let k2 = store_md(&root, b"two", "two", "2026-04-19T11:00:00Z");
+        write_assign_for(&root, &k2.id, "main", vec![], "2026-04-19T11:00:01Z");
+        let entries = commit_all(&root, params("yj", "2026-04-19T11:00:02Z")).unwrap();
+
+        let events = Ledger::new(&root).read_all_events().unwrap();
+        let archive_stores: Vec<_> = events
+            .iter()
+            .filter(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
+            .collect();
+        assert_eq!(
+            archive_stores.len(),
+            2,
+            "two runs with new activity should produce two archives; got: {archive_stores:?}",
+        );
+
+        // Each archive has its own live assign into commits.
+        let archive_ids: std::collections::HashSet<_> =
+            archive_stores.iter().map(|e| e.id.clone()).collect();
+        let assigns_to_commits: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                if e.event_kind != EVENT_KIND_ASSIGN {
+                    return false;
+                }
+                let Ok(a) = AssignEvent::from_event(e) else {
+                    return false;
+                };
+                a.target_root == COMMITS_ROOT && archive_ids.contains(&a.kino_id)
+            })
+            .collect();
+        assert_eq!(assigns_to_commits.len(), 2);
+
+        // The commits kinograph after run 2 lists both archives.
+        let commits_entry = entries
+            .iter()
+            .find(|(n, _)| n == COMMITS_ROOT)
+            .unwrap();
+        let commits_version = commits_entry
+            .1
+            .as_ref()
+            .unwrap()
+            .new_version
+            .as_ref()
+            .unwrap();
+        let ids: std::collections::HashSet<_> =
+            root_ids(&root, commits_version).into_iter().collect();
+        assert_eq!(ids, archive_ids);
     }
 
     #[test]

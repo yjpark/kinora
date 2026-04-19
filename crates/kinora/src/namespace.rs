@@ -165,6 +165,7 @@ mod tests {
         assert_eq!(ext_for_kind("text"), Some("txt"));
         assert_eq!(ext_for_kind("kinograph"), Some("styx"));
         assert_eq!(ext_for_kind("root"), Some("styx"));
+        assert_eq!(ext_for_kind("commit-archive"), Some("jsonl"));
         assert_eq!(ext_for_kind("binary"), None);
     }
 
