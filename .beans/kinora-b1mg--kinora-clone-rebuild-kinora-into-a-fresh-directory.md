@@ -5,7 +5,7 @@ status: todo
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:05Z
-updated_at: 2026-04-19T16:33:49Z
+updated_at: 2026-04-19T19:17:28Z
 blocked_by:
     - kinora-jezf
     - kinora-q6bo
@@ -86,3 +86,54 @@ Attempted to execute during night shift; hit a spec contradiction that can't be 
 **Resolution:** landing q6bo first unblocks b1mg naturally — the commit lifecycle will have moved history out of staged into a stable location clone can copy. Marking this bean blocked-by kinora-q6bo and draft until the q6bo design questions are resolved.
 
 Also amending the bean spec here implicitly: b1mg's "depends on" section originally said q6bo was *not strictly required*. After attempting execution I disagree — it IS strictly required, for the reason above.
+
+## Plan
+
+Three phases, each TDD (tests → impl → review fix per CLAUDE.md).
+
+### Phase A — library `kinora::clone` module
+
+Module API (mirrors `reformat.rs` structure):
+
+```rust
+pub struct CloneParams { pub author: String, pub provenance: String, pub ts: String }
+pub struct CloneReport {
+    pub kinos_rebuilt: usize,
+    pub blobs_dropped: usize,
+    pub filenames_rewritten: usize,
+}
+pub fn clone_repo(src: &Path, dst: &Path, params: CloneParams) -> Result<CloneReport, CloneError>
+```
+
+Algorithm:
+1. Validate src: staged dir is empty (no pending `.jsonl` files)
+2. Validate dst: either doesn't exist or is empty
+3. Init dst layout: config.styx (copy verbatim — not a kino, not content-addressed), ledger/, roots/, HEAD
+4. Walk reachable blobs: for each root pointer in src, read root kinograph, collect entry ids + root hash; recurse into kinograph-kind entries' heads
+5. For each reachable hash: `src_store.read` (with hash verification already built-in) → `dst_store.write(kind, content)`
+6. For each root, copy root pointer to dst (pointing at same blob hash — the blob is already in dst store)
+7. Copy ledger events corresponding to reachable blobs
+8. Report counts
+
+### Phase B — CLI command `kinora clone <src> <dst>`
+
+Follow the `kinora reformat` / `kinora commit` pattern:
+- Add `Clone { src: String, dst: String }` variant to `cli::Command`
+- New `kinora-cli/src/clone.rs` with `run_clone(cwd, args)` — both paths are taken verbatim (NOT walked up via find_repo_root — per bean spec, args are direct paths to `.kinora/` directories)
+- Wire in `main.rs`
+- Output: formatted summary
+
+### Phase C — review fix commit if needed
+
+### Todos
+
+- [ ] Phase A: library clone module — tests first (empty repo, one-kino repo, reachable walk, hash verification, staged-non-empty error)
+- [ ] Phase A: library clone module — impl
+- [ ] Phase B: CLI `kinora clone` — tests + impl
+- [ ] Phase C: review + fixes
+
+## Night shift 2026-04-19 handoff
+
+Plan is captured above. Moved back to `todo` (not `draft` — spec is clear, no open design questions).
+
+Rationale for handoff: this task is a new library module (`kinora::clone`) plus a new CLI command, with a reachability walk, hash verification flow, root pointer + ledger event copy, and acceptance criteria around legacy-filename rewriting. Scope is 3 phases, ~5–8 commits. Better to start it in a fresh session than spill across a compacted one where context has already been heavily used on the preceding kinora-tx3e work.
