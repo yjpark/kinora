@@ -11,6 +11,7 @@ pub mod namespace;
 pub mod paths;
 pub mod render;
 pub mod resolve;
+pub mod root;
 pub mod store;
 pub mod validate;
 pub mod value;
