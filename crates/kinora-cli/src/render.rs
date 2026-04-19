@@ -88,28 +88,37 @@ fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError
         Err(e) => return Err(CliError::Io(e)),
     };
 
-    let store = ContentStore::new(kin_root);
+    // Collect + sort pointer names so multi-root insertion order is
+    // deterministic. Post-phase-3 ownership is exclusive, so collisions
+    // shouldn't happen — but until then, a stable "last writer wins"
+    // rule keeps render output reproducible across machines.
+    let mut names: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_file() {
+        if !entry.file_type()?.is_file() {
             continue;
         }
         let file_name = entry.file_name();
         let Some(root_name) = file_name.to_str() else {
             continue;
         };
-        // Skip the `.<name>.tmp` files `write_root_pointer` creates mid-rename.
+        // Skip `.<name>.tmp` files `write_root_pointer` creates mid-rename.
         if root_name.starts_with('.') {
             continue;
         }
-        let Some(hash) = read_root_pointer(kin_root, root_name)? else {
+        names.push(root_name.to_owned());
+    }
+    names.sort();
+
+    let store = ContentStore::new(kin_root);
+    for root_name in names {
+        let Some(hash) = read_root_pointer(kin_root, &root_name)? else {
             continue;
         };
         let bytes = store.read(&hash).map_err(CliError::Store)?;
         let kinograph = RootKinograph::parse(&bytes).map_err(CliError::Root)?;
         for kino in kinograph.entries {
-            owners.insert(kino.id, root_name.to_owned());
+            owners.insert(kino.id, root_name.clone());
         }
     }
     Ok(owners)
@@ -254,6 +263,23 @@ mod tests {
         let kin = kinora_root(tmp.path());
         let owners = build_owners_map(&kin).unwrap();
         assert!(owners.is_empty(), "expected empty map, got: {owners:?}");
+    }
+
+    #[test]
+    fn build_owners_map_ignores_tmp_and_non_file_entries() {
+        let tmp = repo();
+        let kin = kinora_root(tmp.path());
+        store_kino(&kin, params(b"alpha", "alpha")).unwrap();
+        compact(&kin, "main", compact_params()).unwrap();
+
+        // Simulate a leftover tmp pointer and a stray subdir under roots/.
+        let roots = kin.join("roots");
+        std::fs::write(roots.join(".main.tmp"), "garbage").unwrap();
+        std::fs::create_dir(roots.join("nested-dir")).unwrap();
+
+        // Should still succeed and return the one real root.
+        let owners = build_owners_map(&kin).unwrap();
+        assert!(owners.values().any(|v| v == "main"));
     }
 
     #[test]
