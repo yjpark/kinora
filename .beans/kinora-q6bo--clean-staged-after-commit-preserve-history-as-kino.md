@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T14:39:21Z
-updated_at: 2026-04-19T18:21:32Z
+updated_at: 2026-04-19T18:24:44Z
 blocked_by:
     - kinora-2t6l
 ---
@@ -133,5 +133,5 @@ Three phases, each TDD cycle (tests → impl → review fix). Complete 1 phase =
 - [x] Phase B: commit_archive module impl
 - [ ] Phase C: integration tests
 - [ ] Phase C: commit pipeline archive + cleanup + special-case
-- [ ] Phase C: render exclusion
+- [x] Phase C: render exclusion
 - [ ] Review pass

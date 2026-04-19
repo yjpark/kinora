@@ -106,6 +106,13 @@ fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError
         if root_name.starts_with('.') {
             continue;
         }
+        // The `commits` root holds per-commit archive kinos — infrastructure
+        // metadata, not user content. Render consumers (`mdbook` pages)
+        // should not see them; they're surfaced through `kinora log` / a
+        // future dedicated command instead.
+        if root_name == "commits" {
+            continue;
+        }
         names.push(root_name.to_owned());
     }
     names.sort();
@@ -326,6 +333,27 @@ mod tests {
         let owners = build_owners_map(&kin).unwrap();
         assert_eq!(owners.get(&ev1.event.id).map(String::as_str), Some("main"));
         assert_eq!(owners.get(&ev2.event.id).map(String::as_str), Some("main"));
+    }
+
+    #[test]
+    fn build_owners_map_skips_commits_root_even_with_stale_pointer() {
+        // The `commits` root is infrastructure — per-commit archive kinos,
+        // not user content. render must skip it regardless of pointer state.
+        // This test seeds `roots/commits` with a pointer to a non-existent
+        // hash; if the filter weren't in place, build_owners_map would try
+        // to read the blob and fail with a store error.
+        let tmp = repo();
+        let kin = kinora_root(tmp.path());
+        let roots = kin.join("roots");
+        std::fs::create_dir_all(&roots).unwrap();
+        std::fs::write(roots.join("commits"), "ff".repeat(32)).unwrap();
+
+        // No error, and nothing maps to "commits".
+        let owners = build_owners_map(&kin).unwrap();
+        assert!(
+            owners.values().all(|r| r != "commits"),
+            "owners must not map anything to commits: {owners:?}",
+        );
     }
 
     // ------------------------------------------------------------------
