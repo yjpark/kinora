@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 
+use crate::hash::Hash;
+
 /// Append-only ledger event.
 ///
 /// Fields stored as String for facet-json round-trip simplicity in MVP.
@@ -52,12 +54,24 @@ impl Event {
     pub fn is_birth(&self) -> bool {
         self.id == self.hash && self.parents.is_empty()
     }
+
+    /// Content-addressed identifier for this event.
+    ///
+    /// Computed as `BLAKE3(canonical-json-line)`. `to_json_line()` is the
+    /// canonical encoding: `BTreeMap` iterates keys in sorted order, `Vec`
+    /// preserves order, and facet-json writes struct fields in declaration
+    /// order — so the same logical event always produces the same hash,
+    /// enabling dedup across branches and immutable one-file-per-event
+    /// storage in `.kinora/hot/`.
+    pub fn event_hash(&self) -> Result<Hash, EventError> {
+        let line = self.to_json_line()?;
+        Ok(Hash::of_content(line.as_bytes()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::Hash;
 
     fn sample_event() -> Event {
         let content = b"hello kinora";
@@ -115,5 +129,46 @@ mod tests {
         e.parents = vec![e.hash.clone()];
         e.hash = new_hash;
         assert!(!e.is_birth());
+    }
+
+    #[test]
+    fn event_hash_is_deterministic_across_calls() {
+        let e = sample_event();
+        let a = e.event_hash().unwrap();
+        let b = e.event_hash().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn event_hash_is_blake3_of_json_line() {
+        let e = sample_event();
+        let expected = Hash::of_content(e.to_json_line().unwrap().as_bytes());
+        assert_eq!(e.event_hash().unwrap(), expected);
+    }
+
+    #[test]
+    fn event_hash_differs_when_metadata_differs() {
+        let a = sample_event();
+        let mut b = sample_event();
+        b.metadata.insert("title".into(), "bonjour".into());
+        assert_ne!(a.event_hash().unwrap(), b.event_hash().unwrap());
+    }
+
+    #[test]
+    fn event_hash_is_stable_across_metadata_insertion_order() {
+        // BTreeMap iterates keys in sorted order so insertion order can't
+        // change the hash. Verifies the determinism invariant of
+        // `event_hash`.
+        let mut a = sample_event();
+        a.metadata.clear();
+        a.metadata.insert("name".into(), "n".into());
+        a.metadata.insert("title".into(), "t".into());
+
+        let mut b = sample_event();
+        b.metadata.clear();
+        b.metadata.insert("title".into(), "t".into());
+        b.metadata.insert("name".into(), "n".into());
+
+        assert_eq!(a.event_hash().unwrap(), b.event_hash().unwrap());
     }
 }

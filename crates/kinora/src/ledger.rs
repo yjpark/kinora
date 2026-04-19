@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::event::{Event, EventError};
 use crate::hash::{Hash, SHORTHASH_LEN};
-use crate::paths::{head_path, ledger_dir, ledger_file_path};
+use crate::paths::{head_path, hot_dir, hot_event_path, ledger_dir, ledger_file_path, HOT_EXT};
 
 #[derive(Debug)]
 pub enum LedgerError {
@@ -63,6 +63,7 @@ impl Ledger {
 
     pub fn ensure_layout(&self) -> Result<(), LedgerError> {
         fs::create_dir_all(ledger_dir(&self.kinora_root))?;
+        fs::create_dir_all(hot_dir(&self.kinora_root))?;
         Ok(())
     }
 
@@ -127,6 +128,64 @@ impl Ledger {
     pub fn read_lineage(&self, shorthash: &str) -> Result<Vec<Event>, LedgerError> {
         let file = ledger_file_path(&self.kinora_root, shorthash);
         read_events(&file)
+    }
+
+    /// Write `event` to `.kinora/hot/<ab>/<event-hash>.jsonl`. Idempotent:
+    /// if the target file already exists, returns the hash without touching
+    /// the file (event hash is content-addressed, so an identical path
+    /// implies identical content).
+    ///
+    /// Returns `(event_hash, was_new)` — `was_new` is true iff the file did
+    /// not exist before this call.
+    pub fn write_event(&self, event: &Event) -> Result<(Hash, bool), LedgerError> {
+        self.ensure_layout()?;
+        let line = event.to_json_line()?;
+        let event_hash = Hash::of_content(line.as_bytes());
+        let path = hot_event_path(&self.kinora_root, &event_hash);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut f) => {
+                f.write_all(line.as_bytes())?;
+                f.write_all(b"\n")?;
+                Ok((event_hash, true))
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok((event_hash, false)),
+            Err(e) => Err(LedgerError::Io(e)),
+        }
+    }
+
+    /// Return every event stored under `.kinora/hot/`, deduped by event hash.
+    /// Does **not** read the legacy `.kinora/ledger/` layout — use
+    /// `read_all_lineages` for that. Callers that need both should call both
+    /// and merge.
+    pub fn read_all_events(&self) -> Result<Vec<Event>, LedgerError> {
+        let dir = hot_dir(&self.kinora_root);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<Event> = Vec::new();
+        for shard in fs::read_dir(&dir)? {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path())? {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) != Some(HOT_EXT) {
+                    continue;
+                }
+                for event in read_events(&path)? {
+                    let eh = event.event_hash()?;
+                    if seen.insert(eh.as_hex().to_owned()) {
+                        out.push(event);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Read all lineage files under `.kinora/ledger/` keyed by shorthash.
@@ -328,5 +387,158 @@ mod tests {
         l.set_head("aaaaaaaa").unwrap();
         l.set_head("bbbbbbbb").unwrap();
         assert_eq!(l.current_lineage().unwrap().as_deref(), Some("bbbbbbbb"));
+    }
+
+    // ---- Hot-ledger tests (kinora-mjvb) ----
+
+    #[test]
+    fn write_event_creates_sharded_file_at_event_hash_path() {
+        let (_t, l) = ledger();
+        let e = event("hot-first", "2026-04-19T09:00:00Z");
+        let expected = e.event_hash().unwrap();
+        let (returned, was_new) = l.write_event(&e).unwrap();
+        assert_eq!(returned, expected);
+        assert!(was_new);
+        let path = hot_event_path(l.root(), &expected);
+        assert!(path.is_file(), "hot event file missing: {}", path.display());
+        // Sharded by the first two hex chars.
+        assert!(path.to_string_lossy().contains(&format!("/hot/{}/", expected.shard())));
+    }
+
+    #[test]
+    fn write_event_file_contains_exactly_one_line() {
+        let (_t, l) = ledger();
+        let e = event("hot-one-line", "2026-04-19T09:00:00Z");
+        let (h, _) = l.write_event(&e).unwrap();
+        let contents = fs::read_to_string(hot_event_path(l.root(), &h)).unwrap();
+        assert!(contents.ends_with('\n'), "file should end with newline: {contents:?}");
+        assert_eq!(contents.matches('\n').count(), 1, "expected one line: {contents:?}");
+    }
+
+    #[test]
+    fn write_event_is_idempotent_when_same_event_stored_twice() {
+        let (_t, l) = ledger();
+        let e = event("dup", "2026-04-19T09:00:00Z");
+        let (h1, new1) = l.write_event(&e).unwrap();
+        let (h2, new2) = l.write_event(&e).unwrap();
+        assert_eq!(h1, h2);
+        assert!(new1);
+        assert!(!new2, "second write should report the file was not new");
+    }
+
+    #[test]
+    fn read_all_events_returns_empty_when_no_hot_dir() {
+        let (_t, l) = ledger();
+        // ensure_layout() has been called in `ledger()`, but the hot dir may be
+        // empty — verify this gives us an empty list, not an error.
+        let got = l.read_all_events().unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn read_all_events_roundtrips_written_event() {
+        let (_t, l) = ledger();
+        let e = event("rt", "2026-04-19T09:00:00Z");
+        l.write_event(&e).unwrap();
+        let got = l.read_all_events().unwrap();
+        assert_eq!(got, vec![e]);
+    }
+
+    #[test]
+    fn read_all_events_dedups_across_multiple_writes() {
+        let (_t, l) = ledger();
+        let e = event("same", "2026-04-19T09:00:00Z");
+        l.write_event(&e).unwrap();
+        l.write_event(&e).unwrap();
+        let got = l.read_all_events().unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn read_all_events_returns_every_distinct_event() {
+        let (_t, l) = ledger();
+        let a = event("a", "2026-04-19T09:00:00Z");
+        let b = event("b", "2026-04-19T09:00:01Z");
+        let c = event("c", "2026-04-19T09:00:02Z");
+        l.write_event(&a).unwrap();
+        l.write_event(&b).unwrap();
+        l.write_event(&c).unwrap();
+        let mut got = l.read_all_events().unwrap();
+        got.sort_by(|x, y| x.ts.cmp(&y.ts));
+        assert_eq!(got, vec![a, b, c]);
+    }
+
+    #[test]
+    fn read_all_events_ignores_non_jsonl_files_in_shard_dirs() {
+        let (_t, l) = ledger();
+        let e = event("x", "2026-04-19T09:00:00Z");
+        let (h, _) = l.write_event(&e).unwrap();
+        let shard = hot_dir(l.root()).join(h.shard());
+        fs::write(shard.join("junk.txt"), b"ignore me").unwrap();
+        let got = l.read_all_events().unwrap();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn cross_branch_merge_simulation_unions_files_without_conflict() {
+        // Simulate two branches independently writing events. A set-union
+        // of their hot dirs (as git merge would produce) should yield the
+        // union of events with no overlap issues.
+        let base = TempDir::new().unwrap();
+        let a_root = base.path().join("a");
+        let b_root = base.path().join("b");
+        let merged = base.path().join("merged");
+
+        let la = Ledger::new(&a_root);
+        la.ensure_layout().unwrap();
+        let lb = Ledger::new(&b_root);
+        lb.ensure_layout().unwrap();
+
+        let ea = event("branch-a", "2026-04-19T09:00:00Z");
+        let eb = event("branch-b", "2026-04-19T09:00:01Z");
+        la.write_event(&ea).unwrap();
+        lb.write_event(&eb).unwrap();
+
+        // "Merge" = copy both hot trees into the merged location.
+        let lm = Ledger::new(&merged);
+        lm.ensure_layout().unwrap();
+        for src in [&a_root, &b_root] {
+            copy_hot_tree(&hot_dir(src), &hot_dir(&merged));
+        }
+
+        let mut got = lm.read_all_events().unwrap();
+        got.sort_by(|x, y| x.ts.cmp(&y.ts));
+        assert_eq!(got, vec![ea, eb]);
+    }
+
+    #[test]
+    fn write_event_file_name_is_event_hash_with_jsonl_ext() {
+        let (_t, l) = ledger();
+        let e = event("filename-shape", "2026-04-19T09:00:00Z");
+        let (h, _) = l.write_event(&e).unwrap();
+        let path = hot_event_path(l.root(), &h);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, format!("{}.jsonl", h.as_hex()));
+    }
+
+    fn copy_hot_tree(src: &Path, dst: &Path) {
+        if !src.exists() {
+            return;
+        }
+        fs::create_dir_all(dst).unwrap();
+        for shard in fs::read_dir(src).unwrap() {
+            let shard = shard.unwrap();
+            if !shard.file_type().unwrap().is_dir() {
+                continue;
+            }
+            let shard_dst = dst.join(shard.file_name());
+            fs::create_dir_all(&shard_dst).unwrap();
+            for entry in fs::read_dir(shard.path()).unwrap() {
+                let entry = entry.unwrap();
+                let from = entry.path();
+                let to = shard_dst.join(entry.file_name());
+                fs::copy(&from, &to).unwrap();
+            }
+        }
     }
 }
