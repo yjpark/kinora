@@ -28,6 +28,7 @@ use crate::config::{Config, ConfigError, RootPolicy};
 use crate::event::{Event, EventError};
 use crate::hash::{Hash, HashParseError};
 use crate::kino::{store_kino, StoreKinoError, StoreKinoParams};
+use crate::kinograph::{Kinograph, KinographError};
 use crate::ledger::{Ledger, LedgerError};
 use crate::paths::{config_path, hot_event_path, root_pointer_path, roots_dir};
 use crate::root::{RootEntry, RootError, RootKinograph};
@@ -54,6 +55,7 @@ pub enum CompactError {
     StoreKino(StoreKinoError),
     Config(ConfigError),
     Assign(AssignError),
+    Kinograph(KinographError),
     InvalidHash { value: String, err: HashParseError },
     MultipleHeads { id: String, heads: Vec<String> },
     NoHead { id: String },
@@ -108,6 +110,7 @@ impl std::fmt::Display for CompactError {
                 "invalid root name {name:?}: must be a single path component with no `/`, `\\`, or `..`"
             ),
             CompactError::Assign(e) => write!(f, "{e}"),
+            CompactError::Kinograph(e) => write!(f, "{e}"),
             CompactError::AmbiguousAssign { kino_id, candidates } => write!(
                 f,
                 "ambiguous assigns for kino {kino_id}: {} live candidates",
@@ -171,6 +174,12 @@ impl From<AssignError> for CompactError {
     }
 }
 
+impl From<KinographError> for CompactError {
+    fn from(e: KinographError) -> Self {
+        CompactError::Kinograph(e)
+    }
+}
+
 /// Inputs for a compact call. Mirrors the parts of `StoreKinoParams` that
 /// the root-kino event also needs.
 #[derive(Debug, Clone)]
@@ -188,6 +197,147 @@ pub struct CompactResult {
     /// prior version byte-for-byte).
     pub new_version: Option<Hash>,
     pub prior_version: Option<Hash>,
+    /// Referencing-root → number of entries in the compacted root that
+    /// survived policy-based GC solely because another root's composition
+    /// kinograph pointed at them. Empty when no cross-root protection
+    /// fired.
+    pub retained_by_cross_root: BTreeMap<String, usize>,
+}
+
+/// Snapshot of cross-root composition references. Built once at the start
+/// of a compaction batch (or standalone compact) by walking every declared
+/// root's last-compacted root-kinograph and collecting the `(target_id,
+/// target_version)` pointers that each composition kinograph entry names.
+///
+/// Used during GC / hot-prune: any entry whose `(id, version)` appears as
+/// a target is treated as implicitly pinned — protected from drop even
+/// when policy would otherwise evict it.
+#[derive(Debug, Default, Clone)]
+pub struct ExternalRefs {
+    /// `(target_id, target_version)` → set of root names whose composition
+    /// kinograph entries point at that target.
+    by_target: BTreeMap<(String, String), BTreeSet<String>>,
+}
+
+impl ExternalRefs {
+    /// Build a global snapshot by walking every declared root's latest
+    /// root kinograph (if any), iterating `kind == "kinograph"` entries,
+    /// fetching each kinograph blob, parsing it, and recording each
+    /// composition entry's target along with the source root that
+    /// referenced it.
+    ///
+    /// The snapshot does not filter by self — query methods take
+    /// `self_root` and drop references whose source equals it. That lets
+    /// `compact_all` compute this once per batch instead of once per
+    /// root.
+    ///
+    /// Unpinned composition entries resolve to the referenced id's head
+    /// version via `pick_head` against `events`. Resolution failures (no
+    /// events, fork) are skipped — cross-root integrity is best-effort.
+    ///
+    /// Any root pointer that cannot be resolved (missing blob, parse
+    /// failure) is silently skipped: that root's own per-root compact
+    /// will surface the failure on its own, and cross-root integrity is
+    /// a best-effort layer.
+    pub fn collect(
+        kinora_root: &Path,
+        declared_roots: &BTreeSet<String>,
+        events: &[Event],
+    ) -> Result<Self, CompactError> {
+        let store = ContentStore::new(kinora_root);
+        let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+        let mut events_by_id: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
+        for e in events {
+            if !e.is_store_event() || e.kind == "root" {
+                continue;
+            }
+            events_by_id.entry(e.id.clone()).or_default().push(e);
+        }
+
+        for source_root in declared_roots {
+            let root_ptr = match read_root_pointer(kinora_root, source_root) {
+                Ok(Some(h)) => h,
+                Ok(None) => continue,
+                Err(_) => continue,
+            };
+            let root_bytes = match store.read(&root_ptr) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let root_kg = match RootKinograph::parse(&root_bytes) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            for entry in &root_kg.entries {
+                if entry.kind != "kinograph" {
+                    continue;
+                }
+                let version_hash = match Hash::from_str(&entry.version) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                };
+                let kg_bytes = match store.read(&version_hash) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let kg = match Kinograph::parse(&kg_bytes) {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+                for comp in &kg.entries {
+                    let target_version = if !comp.pin.is_empty() {
+                        comp.pin.clone()
+                    } else {
+                        let Some(group) = events_by_id.get(&comp.id) else {
+                            continue;
+                        };
+                        match pick_head(&comp.id, group) {
+                            Ok(head) => head.hash.clone(),
+                            Err(_) => continue,
+                        }
+                    };
+                    out.entry((comp.id.clone(), target_version))
+                        .or_default()
+                        .insert(source_root.clone());
+                }
+            }
+        }
+        Ok(Self { by_target: out })
+    }
+
+    /// Versions (content hashes) referenced by any root other than
+    /// `self_root`. Keys are the raw `version` strings, matching how
+    /// `RootEntry::version` is stored. Self-references (a root
+    /// composition pointing at a kino it also owns) don't need
+    /// cross-root protection — explicit pinning already covers that.
+    fn implicit_pinned_versions(&self, self_root: &str) -> BTreeSet<String> {
+        self.by_target
+            .iter()
+            .filter(|(_, sources)| sources.iter().any(|s| s != self_root))
+            .map(|((_, v), _)| v.clone())
+            .collect()
+    }
+
+    /// Referencing-root names for a given `(id, version)` pair, excluding
+    /// `self_root`. Returns `None` when no external root references it.
+    fn referencing_roots(
+        &self,
+        id: &str,
+        version: &str,
+        self_root: &str,
+    ) -> Option<BTreeSet<String>> {
+        let set = self.by_target.get(&(id.to_owned(), version.to_owned()))?;
+        let filtered: BTreeSet<String> = set
+            .iter()
+            .filter(|s| s.as_str() != self_root)
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
+            None
+        } else {
+            Some(filtered)
+        }
+    }
 }
 
 /// Validate that `root_name` is a single safe path component. Rejects
@@ -414,22 +564,50 @@ pub fn compact_root(
     params: CompactParams,
 ) -> Result<CompactResult, CompactError> {
     validate_root_name(root_name)?;
-    let prior_version = read_root_pointer(kinora_root, root_name)?;
-
     let cfg_path = config_path(kinora_root);
     let cfg_text = fs::read_to_string(&cfg_path)?;
     let config = Config::from_styx(&cfg_text)?;
     let declared_roots: BTreeSet<String> = config.roots.keys().cloned().collect();
+
+    let ledger = Ledger::new(kinora_root);
+    let events = ledger.read_all_events()?;
+
+    let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
+    compact_root_with_refs(
+        kinora_root,
+        root_name,
+        params,
+        &config,
+        &declared_roots,
+        &events,
+        &refs,
+    )
+}
+
+/// Inner compact helper that takes a precomputed `ExternalRefs` snapshot
+/// (built once per `compact_all` batch) and skips the config + event
+/// re-reads. Standalone `compact_root` calls wrap this with a per-call
+/// snapshot.
+#[allow(clippy::too_many_arguments)]
+fn compact_root_with_refs(
+    kinora_root: &Path,
+    root_name: &str,
+    params: CompactParams,
+    config: &Config,
+    declared_roots: &BTreeSet<String>,
+    events: &[Event],
+    refs: &ExternalRefs,
+) -> Result<CompactResult, CompactError> {
+    validate_root_name(root_name)?;
+    let prior_version = read_root_pointer(kinora_root, root_name)?;
+
     let policy = config
         .roots
         .get(root_name)
         .cloned()
         .unwrap_or(RootPolicy::Never);
 
-    let ledger = Ledger::new(kinora_root);
-    let events = ledger.read_all_events()?;
-
-    let mut root = build_root(&events, root_name, &declared_roots)?;
+    let mut root = build_root(events, root_name, declared_roots)?;
 
     // Load prior root kinograph (if any) so we can carry pinned entries
     // forward. Pinned entries survive rebuilds verbatim for kinos still
@@ -443,9 +621,22 @@ pub fn compact_root(
     };
     propagate_pins(&mut root, prior_root.as_ref());
 
+    let implicit_pinned = refs.implicit_pinned_versions(root_name);
+
     // Policy-driven root-entry GC. MaxAge drops unpinned entries whose head
     // ts is older than the cutoff; Never and KeepLastN leave entries alone.
-    apply_root_entry_gc(&mut root, &events, &policy, &params.ts)?;
+    // Entries whose version is implicitly pinned by a cross-root reference
+    // are also protected — the retention-by-cross-root report records who
+    // saved each one.
+    let retained_by_cross_root = apply_root_entry_gc(
+        &mut root,
+        root_name,
+        events,
+        &policy,
+        &params.ts,
+        &implicit_pinned,
+        refs,
+    )?;
 
     let new_bytes = root.to_styx()?.into_bytes();
 
@@ -457,6 +648,7 @@ pub fn compact_root(
                     root_name: root_name.to_owned(),
                     new_version: None,
                     prior_version: prior_version.clone(),
+                    retained_by_cross_root: retained_by_cross_root.clone(),
                 }
             } else {
                 let prior_event = events
@@ -489,6 +681,7 @@ pub fn compact_root(
                     root_name: root_name.to_owned(),
                     new_version: Some(new_hash),
                     prior_version: prior_version.clone(),
+                    retained_by_cross_root: retained_by_cross_root.clone(),
                 }
             }
         }
@@ -498,6 +691,7 @@ pub fn compact_root(
                     root_name: root_name.to_owned(),
                     new_version: None,
                     prior_version: None,
+                    retained_by_cross_root: retained_by_cross_root.clone(),
                 }
             } else {
                 let stored = store_kino(
@@ -524,6 +718,7 @@ pub fn compact_root(
                     root_name: root_name.to_owned(),
                     new_version: Some(new_hash),
                     prior_version: None,
+                    retained_by_cross_root: retained_by_cross_root.clone(),
                 }
             }
         }
@@ -534,12 +729,13 @@ pub fn compact_root(
     // required (safe) rather than smaller than the pointer can resolve.
     prune_hot_events(
         kinora_root,
-        &events,
+        events,
         root_name,
-        &declared_roots,
+        declared_roots,
         &root,
         &policy,
         &params.ts,
+        &implicit_pinned,
     )?;
 
     Ok(result)
@@ -575,17 +771,27 @@ fn propagate_pins(root: &mut RootKinograph, prior: Option<&RootKinograph>) {
 }
 
 /// Drop root entries whose head ts is older than the `MaxAge` cutoff,
-/// unless the entry is pinned. No-op for `Never` and `KeepLastN` —
-/// `KeepLastN` acts on the hot ledger, not the root view (the root view
-/// already has at most one entry per kino by `pick_head`).
+/// unless the entry is pinned (explicitly or implicitly by a cross-root
+/// reference). No-op for `Never` and `KeepLastN` — `KeepLastN` acts on
+/// the hot ledger, not the root view (the root view already has at most
+/// one entry per kino by `pick_head`).
+///
+/// Returns a `referencing-root → count` map listing how many entries were
+/// rescued from GC by an external reference. This report feeds into the
+/// CLI's retention hint.
+#[allow(clippy::too_many_arguments)]
 fn apply_root_entry_gc(
     root: &mut RootKinograph,
+    root_name: &str,
     events: &[Event],
     policy: &RootPolicy,
     now: &str,
-) -> Result<(), CompactError> {
+    implicit_pinned: &BTreeSet<String>,
+    refs: &ExternalRefs,
+) -> Result<BTreeMap<String, usize>, CompactError> {
+    let mut retained: BTreeMap<String, usize> = BTreeMap::new();
     let Some(max_age_s) = policy.max_age_seconds() else {
-        return Ok(());
+        return Ok(retained);
     };
     let now_ts = parse_ts(now)?;
     let cutoff = now_ts - max_age_s;
@@ -594,21 +800,38 @@ fn apply_root_entry_gc(
         .filter(|e| e.is_store_event())
         .map(|e| (e.hash.as_str(), e))
         .collect();
+    let mut implicit_hits: Vec<(String, String)> = Vec::new();
     root.entries.retain(|entry| {
         if entry.pin {
             return true;
         }
         let Some(head) = by_hash.get(entry.version.as_str()) else {
-            // Head missing from ledger — keep the entry. A downstream
-            // integrity pass (f0rg) will flag this; GC stays conservative.
+            // Head missing from ledger — keep the entry. The hot ledger
+            // may have been externally trimmed; stay conservative rather
+            // than evict on unverifiable state.
             return true;
         };
-        match parse_ts(&head.ts) {
-            Ok(t) => t >= cutoff,
-            Err(_) => true,
+        let old = match parse_ts(&head.ts) {
+            Ok(t) => t < cutoff,
+            Err(_) => false,
+        };
+        if !old {
+            return true;
         }
+        if implicit_pinned.contains(&entry.version) {
+            implicit_hits.push((entry.id.clone(), entry.version.clone()));
+            return true;
+        }
+        false
     });
-    Ok(())
+    for (id, version) in implicit_hits {
+        if let Some(referencing) = refs.referencing_roots(&id, &version, root_name) {
+            for r in referencing {
+                *retained.entry(r.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(retained)
 }
 
 /// Parse an RFC3339 timestamp into seconds-since-epoch. Errors are
@@ -639,6 +862,7 @@ fn parse_ts(s: &str) -> Result<i64, CompactError> {
 /// entries point at it and the content store still holds the blob; but on
 /// KeepLastN specifically we protect the head event from the N-window by
 /// always including it in the survivor set.
+#[allow(clippy::too_many_arguments)]
 fn prune_hot_events(
     kinora_root: &Path,
     events: &[Event],
@@ -647,18 +871,24 @@ fn prune_hot_events(
     root: &RootKinograph,
     policy: &RootPolicy,
     now: &str,
+    implicit_pinned: &BTreeSet<String>,
 ) -> Result<(), CompactError> {
     if matches!(policy, RootPolicy::Never) {
         return Ok(());
     }
 
     // Pinned versions (content hashes) — these store events must survive.
-    let pinned_versions: BTreeSet<&str> = root
+    // Includes explicit `pin: true` entries *and* versions implicitly
+    // pinned by a cross-root composition reference.
+    let mut pinned_versions: BTreeSet<&str> = root
         .entries
         .iter()
         .filter(|e| e.pin)
         .map(|e| e.version.as_str())
         .collect();
+    for v in implicit_pinned {
+        pinned_versions.insert(v.as_str());
+    }
 
     // Recompute live-assign routing to find each store event's owning root.
     let live_assigns = collect_live_assigns(events)?;
@@ -771,10 +1001,28 @@ pub fn compact_all(
     let cfg_path = config_path(kinora_root);
     let cfg_text = fs::read_to_string(&cfg_path)?;
     let config = Config::from_styx(&cfg_text)?;
+    let declared_roots: BTreeSet<String> = config.roots.keys().cloned().collect();
+
+    let ledger = Ledger::new(kinora_root);
+    let events = ledger.read_all_events()?;
+
+    // Snapshot the cross-root composition pointers as they stand at batch
+    // start. Roots compacted earlier in this loop may produce new versions,
+    // but the snapshot-at-start is what every root in the batch evaluates
+    // against — conservative and deterministic.
+    let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
 
     let mut out: Vec<CompactAllEntry> = Vec::with_capacity(config.roots.len());
     for name in config.roots.keys() {
-        let result = compact_root(kinora_root, name, params.clone());
+        let result = compact_root_with_refs(
+            kinora_root,
+            name,
+            params.clone(),
+            &config,
+            &declared_roots,
+            &events,
+            &refs,
+        );
         out.push((name.clone(), result));
     }
     Ok(out)

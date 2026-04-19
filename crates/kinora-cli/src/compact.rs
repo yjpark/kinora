@@ -357,6 +357,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
                 root_name: "main".into(),
                 new_version: Some(hash.clone()),
                 prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::new(),
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
@@ -373,6 +374,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
                 root_name: "inbox".into(),
                 new_version: None,
                 prior_version: None,
+                retained_by_cross_root: std::collections::BTreeMap::new(),
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
