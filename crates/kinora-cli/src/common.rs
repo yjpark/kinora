@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use kinora::compact::CompactError;
 use kinora::config::ConfigError;
 use kinora::kino::StoreKinoError;
 use kinora::kinograph::KinographError;
@@ -24,6 +25,7 @@ pub enum CliError {
     Kinograph(KinographError),
     Render(RenderError),
     Ledger(LedgerError),
+    Compact(CompactError),
 }
 
 impl fmt::Display for CliError {
@@ -57,6 +59,7 @@ impl fmt::Display for CliError {
             CliError::Kinograph(e) => write!(f, "{e}"),
             CliError::Render(e) => write!(f, "{e}"),
             CliError::Ledger(e) => write!(f, "{e}"),
+            CliError::Compact(e) => write!(f, "{e}"),
         }
     }
 }
@@ -102,6 +105,12 @@ impl From<RenderError> for CliError {
 impl From<LedgerError> for CliError {
     fn from(e: LedgerError) -> Self {
         CliError::Ledger(e)
+    }
+}
+
+impl From<CompactError> for CliError {
+    fn from(e: CompactError) -> Self {
+        CliError::Compact(e)
     }
 }
 

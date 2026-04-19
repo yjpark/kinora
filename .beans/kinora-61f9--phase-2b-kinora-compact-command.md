@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T06:50:57Z
-updated_at: 2026-04-19T07:09:25Z
+updated_at: 2026-04-19T07:11:40Z
 parent: kinora-xi21
 blocked_by:
     - kinora-h4xs
@@ -73,9 +73,9 @@ Phase 2 ships single-flat-root. Default `--root main` when not specified. Phase 
 - [x] Two independent compactions over the same hot-event set produce byte-identical root blobs (cross-dev determinism test)
 - [x] Entry order is sorted by id — parse output and assert
 - [x] Pointer file `.kinora/roots/<name>` contains the 64-hex version hash only (no trailing whitespace/newline, or explicit trailing newline — pick one and test it)
-- [ ] CLI `kinora compact` prints expected output, exits 0
+- [x] CLI `kinora compact` prints expected output, exits 0
 - [x] Integration test: store 3 markdown kinos → compact → assert root has 3 entries → store a v2 → compact again → assert root has 3 entries with one bumped version
-- [ ] Zero compiler warnings
+- [x] Zero compiler warnings
 
 ## Out of scope
 

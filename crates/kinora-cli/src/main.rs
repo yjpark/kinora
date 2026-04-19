@@ -2,6 +2,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use cli::{Cli, Command};
+use compact::{run_compact, CompactRunArgs};
 use render::{run_render, RenderRunArgs};
 use resolve::{
     head_lineages, render_all_heads, render_fork_report, run_resolve, ResolveOutcome,
@@ -11,6 +12,7 @@ use store::{run_store, StoreRunArgs};
 
 mod cli;
 mod common;
+mod compact;
 mod render;
 mod resolve;
 mod store;
@@ -90,6 +92,36 @@ fn main() -> ExitCode {
                         skipped_note,
                         report.cache_path.display(),
                     );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Compact { root, author, provenance } => {
+            let args = CompactRunArgs { root, author, provenance };
+            match run_compact(&cwd, args) {
+                Ok(result) => {
+                    match result.new_version {
+                        Some(h) => println!(
+                            "root={} version={} (new version)",
+                            result.root_name,
+                            h.shorthash(),
+                        ),
+                        None => {
+                            let version_str = result
+                                .prior_version
+                                .as_ref()
+                                .map(|h| h.shorthash().to_owned())
+                                .unwrap_or_else(|| "-".into());
+                            println!(
+                                "root={} version={} (no-op)",
+                                result.root_name, version_str,
+                            );
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
