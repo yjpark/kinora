@@ -20,6 +20,7 @@ pub const RESERVED_KINDS: &[&str] = &[
     "binary",
     "kinograph",
     "root",
+    "commit-archive",
 ];
 
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -80,6 +81,7 @@ pub fn ext_for_kind(kind: &str) -> Option<&'static str> {
         "text" => Some("txt"),
         "kinograph" => Some("styx"),
         "root" => Some("styx"),
+        "commit-archive" => Some("jsonl"),
         "binary" => None,
         _ => None,
     }

@@ -79,8 +79,9 @@ pub enum RenderError {
 /// Pages are sorted by `(name-or-empty, id)` so the output is stable across
 /// runs. Identities with no head are skipped silently (shouldn't happen once
 /// the ledger is well-formed, but it keeps the renderer robust). Kinos of
-/// kind `root` are skipped entirely — they're internal bookkeeping (the
-/// root kinograph versions themselves) and should not appear as pages.
+/// kind `root` or `commit-archive` are skipped entirely — they're internal
+/// bookkeeping (root kinograph versions and per-commit archive blobs) and
+/// should not appear as pages.
 pub fn render(
     resolver: &Resolver,
     labels: &HashMap<String, String>,
@@ -105,7 +106,7 @@ pub fn render(
             Err(e) => return Err(RenderError::Resolve(e)),
         };
         let kind = resolved.head.kind.clone();
-        if kind == "root" {
+        if kind == "root" || kind == crate::commit_archive::ARCHIVE_CONTENT_KIND {
             continue;
         }
         let name = resolved

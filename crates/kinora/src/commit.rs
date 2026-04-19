@@ -23,7 +23,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use crate::assign::{AssignError, AssignEvent, EVENT_KIND_ASSIGN};
+use crate::assign::{write_assign, AssignError, AssignEvent, EVENT_KIND_ASSIGN};
+use crate::commit_archive::{
+    serialize_archive, ArchiveError, ARCHIVE_CONTENT_KIND,
+};
 use crate::config::{Config, ConfigError, RootPolicy};
 use crate::event::{Event, EventError};
 use crate::hash::{Hash, HashParseError};
@@ -33,6 +36,15 @@ use crate::ledger::{Ledger, LedgerError};
 use crate::paths::{config_path, staged_event_path, root_pointer_path, roots_dir};
 use crate::root::{RootEntry, RootError, RootKinograph};
 use crate::store::{ContentStore, StoreError};
+
+/// Name of the reserved root that holds per-commit archive kinos. Every
+/// non-commits root produces one archive kino per commit that actually
+/// promotes work; the archive is then assigned to this root so its own
+/// kinograph doubles as the commit history for the repo.
+///
+/// Auto-provisioned by `Config::from_styx` with `RootPolicy::Never` —
+/// archives are never dropped on age/window.
+pub const COMMITS_ROOT: &str = "commits";
 
 /// A single live assign candidate surfaced in `AmbiguousAssign` so callers
 /// (notably the CLI) can render the D2 resolution hint without re-loading
@@ -65,6 +77,8 @@ pub enum CommitError {
     Assign(#[from] AssignError),
     #[error(transparent)]
     Kinograph(#[from] KinographError),
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
     #[error("invalid hash `{value}`: {err}")]
     InvalidHash {
         value: String,
@@ -706,6 +720,23 @@ fn commit_root_with_refs(
         }
     };
 
+    // Non-commits roots that actually promoted work emit a per-commit
+    // archive kino so staging can be cleaned without losing provenance.
+    // The archive is content-addressed; re-running commit with no new
+    // activity is idempotent (same owned events → same archive hash →
+    // same assign). commits root itself is excluded (its kinograph already
+    // lists each archive; an archive-of-archives would just duplicate
+    // that record).
+    if root_name != COMMITS_ROOT && result.new_version.is_some() {
+        maybe_archive_owned_events(
+            kinora_root,
+            root_name,
+            events,
+            declared_roots,
+            &params,
+        )?;
+    }
+
     // Prune staged events owned by this root per policy. Runs after the pointer
     // write so a crash mid-prune leaves the ledger larger than strictly
     // required (safe) rather than smaller than the pointer can resolve.
@@ -721,6 +752,106 @@ fn commit_root_with_refs(
     )?;
 
     Ok(result)
+}
+
+/// Collect all staged events owned by `root_name` — store events routed
+/// via live assigns (default inbox), and assign events whose target is
+/// this root. Store events of kind `root` are excluded (they form the
+/// commit parent chain and are not user content).
+fn collect_owned_staged_events<'e>(
+    events: &'e [Event],
+    root_name: &str,
+    declared_roots: &BTreeSet<String>,
+) -> Result<Vec<&'e Event>, CommitError> {
+    let live_assigns = collect_live_assigns(events)?;
+    let mut owned: Vec<&Event> = Vec::new();
+    for e in events {
+        if e.event_kind == EVENT_KIND_ASSIGN {
+            if let Ok(a) = AssignEvent::from_event(e)
+                && a.target_root == root_name
+            {
+                owned.push(e);
+            }
+            continue;
+        }
+        if !e.is_store_event() || e.kind == "root" {
+            continue;
+        }
+        let target = kino_target_root(&e.id, &live_assigns, declared_roots)?;
+        let target_name = target.as_deref().unwrap_or("inbox");
+        if target_name == root_name {
+            owned.push(e);
+        }
+    }
+    Ok(owned)
+}
+
+/// Archive the staged events owned by `root_name` into a `commit-archive`
+/// kino, and produce an assign targeting `commits` so the commits root
+/// can incorporate it on its own commit step.
+///
+/// Returns `Ok(None)` when the root has no owned events (nothing to
+/// archive — commit produced no new version either, in practice). Returns
+/// `Ok(Some(archive_id))` otherwise. Idempotent: re-running with the same
+/// owned-event set produces the same archive kino id (content-addressed)
+/// and skips writing a duplicate assign.
+fn maybe_archive_owned_events(
+    kinora_root: &Path,
+    root_name: &str,
+    events: &[Event],
+    declared_roots: &BTreeSet<String>,
+    params: &CommitParams,
+) -> Result<Option<String>, CommitError> {
+    let owned_refs = collect_owned_staged_events(events, root_name, declared_roots)?;
+    if owned_refs.is_empty() {
+        return Ok(None);
+    }
+    let owned: Vec<Event> = owned_refs.into_iter().cloned().collect();
+    let archive_bytes = serialize_archive(&owned)?;
+
+    let mut metadata = BTreeMap::new();
+    metadata.insert("name".into(), format!("{root_name}-commit-archive"));
+
+    let stored = store_kino(
+        kinora_root,
+        StoreKinoParams {
+            kind: ARCHIVE_CONTENT_KIND.into(),
+            content: archive_bytes,
+            author: params.author.clone(),
+            provenance: params.provenance.clone(),
+            ts: params.ts.clone(),
+            metadata,
+            id: None,
+            parents: vec![],
+        },
+    )?;
+    let archive_id = stored.event.id.clone();
+
+    // Skip writing a new assign if a live one already targets commits for
+    // this archive kino — otherwise re-running commit with the same state
+    // at a different timestamp would pile up redundant live assigns and
+    // trigger AmbiguousAssign later.
+    let already_assigned = events.iter().any(|e| {
+        if e.event_kind != EVENT_KIND_ASSIGN {
+            return false;
+        }
+        let Ok(a) = AssignEvent::from_event(e) else {
+            return false;
+        };
+        a.kino_id == archive_id && a.target_root == COMMITS_ROOT
+    });
+    if !already_assigned {
+        let assign = AssignEvent {
+            kino_id: archive_id.clone(),
+            target_root: COMMITS_ROOT.into(),
+            supersedes: vec![],
+            author: params.author.clone(),
+            ts: params.ts.clone(),
+            provenance: params.provenance.clone(),
+        };
+        write_assign(kinora_root, &assign)?;
+    }
+    Ok(Some(archive_id))
 }
 
 /// Copy `pin` + `version` from prior root's entries into the freshly built
@@ -1049,15 +1180,16 @@ pub fn commit_all(
     // last. The commits root's job is to consume the archive-assigns each
     // other root produces during this batch — so it must run after every
     // sibling has had a chance to stage its archive.
-    let ordered: Vec<&String> = config
+    let non_commits: Vec<String> = config
         .roots
         .keys()
-        .filter(|n| n.as_str() != "commits")
-        .chain(config.roots.keys().filter(|n| n.as_str() == "commits"))
+        .filter(|n| n.as_str() != COMMITS_ROOT)
+        .cloned()
         .collect();
+    let has_commits = config.roots.contains_key(COMMITS_ROOT);
 
-    let mut out: Vec<CommitAllEntry> = Vec::with_capacity(ordered.len());
-    for name in ordered {
+    let mut out: Vec<CommitAllEntry> = Vec::with_capacity(config.roots.len());
+    for name in &non_commits {
         let result = commit_root_with_refs(
             kinora_root,
             name,
@@ -1069,6 +1201,26 @@ pub fn commit_all(
         );
         out.push((name.clone(), result));
     }
+
+    // Re-read the ledger before committing the commits root so it can see
+    // every archive-assign that was just staged. The non-commits iterations
+    // above may have appended archive store + assign events to staging; the
+    // `events` snapshot from the top of this function predates them.
+    if has_commits {
+        let fresh_events = ledger.read_all_events()?;
+        let fresh_refs = ExternalRefs::collect(kinora_root, &declared_roots, &fresh_events)?;
+        let result = commit_root_with_refs(
+            kinora_root,
+            COMMITS_ROOT,
+            params.clone(),
+            &config,
+            &declared_roots,
+            &fresh_events,
+            &fresh_refs,
+        );
+        out.push((COMMITS_ROOT.to_owned(), result));
+    }
+
     Ok(out)
 }
 
@@ -1860,11 +2012,22 @@ roots {
         assert_eq!(main_ids, vec![k.id.clone()], "main should initially own the kino");
 
         // Reassign to rfcs; main's last-assign hash is looked up from the
-        // previous step's event stream via the ledger.
+        // previous step's event stream via the ledger. The ledger may also
+        // contain archive-assigns pointing at `commits` (produced by the
+        // archive lifecycle), so filter by kino id + target root to find the
+        // specific assign we mean to supersede.
         let prior_assigns = Ledger::new(&root).read_all_events().unwrap();
         let prior_main_assign = prior_assigns
             .iter()
-            .find(|e| e.event_kind == EVENT_KIND_ASSIGN)
+            .find(|e| {
+                if e.event_kind != EVENT_KIND_ASSIGN {
+                    return false;
+                }
+                let Ok(a) = AssignEvent::from_event(e) else {
+                    return false;
+                };
+                a.kino_id == k.id && a.target_root == "main"
+            })
             .unwrap();
         let supersedes_hash = prior_main_assign.event_hash().unwrap();
         write_assign_for(
