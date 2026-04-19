@@ -34,8 +34,10 @@ pub enum CompactError {
     StoreKino(StoreKinoError),
     InvalidHash { value: String, err: HashParseError },
     MultipleHeads { id: String, heads: Vec<String> },
+    NoHead { id: String },
     PriorEventMissing { version: String },
     InvalidPointer { path: PathBuf, body: String },
+    InvalidRootName { name: String },
 }
 
 impl std::fmt::Display for CompactError {
@@ -56,6 +58,10 @@ impl std::fmt::Display for CompactError {
                 heads.len(),
                 heads.join(", ")
             ),
+            CompactError::NoHead { id } => write!(
+                f,
+                "identity {id} has no head (event graph cycle?)"
+            ),
             CompactError::PriorEventMissing { version } => write!(
                 f,
                 "prior root pointer references version {version} but no matching event is in the ledger"
@@ -64,6 +70,10 @@ impl std::fmt::Display for CompactError {
                 f,
                 "root pointer at {} is not a 64-hex hash: {body:?}",
                 path.display()
+            ),
+            CompactError::InvalidRootName { name } => write!(
+                f,
+                "invalid root name {name:?}: must be a single path component with no `/`, `\\`, or `..`"
             ),
         }
     }
@@ -126,6 +136,23 @@ pub struct CompactResult {
     pub prior_version: Option<Hash>,
 }
 
+/// Validate that `root_name` is a single safe path component. Rejects
+/// empty strings, names containing `/` or `\`, and `..` / `.`. The pointer
+/// file lives at `.kinora/roots/<name>`, so a name with traversal pieces
+/// could escape the dir — block it defensively even though the CLI layer
+/// ought to hand us well-formed input.
+pub fn validate_root_name(name: &str) -> Result<(), CompactError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+    {
+        return Err(CompactError::InvalidRootName { name: name.to_owned() });
+    }
+    Ok(())
+}
+
 /// Read the current root pointer file. Returns `None` when the file does
 /// not yet exist (no compaction has happened for this root). The body is
 /// expected to be exactly a 64-hex hash with no trailing whitespace.
@@ -133,6 +160,7 @@ pub fn read_root_pointer(
     kinora_root: &Path,
     root_name: &str,
 ) -> Result<Option<Hash>, CompactError> {
+    validate_root_name(root_name)?;
     let path = root_pointer_path(kinora_root, root_name);
     match fs::read_to_string(&path) {
         Ok(body) => {
@@ -208,10 +236,7 @@ fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CompactErr
         .collect();
     match heads.as_slice() {
         [only] => Ok(*only),
-        [] => Err(CompactError::MultipleHeads {
-            id: id.to_owned(),
-            heads: vec![],
-        }),
+        [] => Err(CompactError::NoHead { id: id.to_owned() }),
         many => Err(CompactError::MultipleHeads {
             id: id.to_owned(),
             heads: many.iter().map(|e| e.hash.clone()).collect(),
@@ -234,6 +259,7 @@ pub fn compact(
     root_name: &str,
     params: CompactParams,
 ) -> Result<CompactResult, CompactError> {
+    validate_root_name(root_name)?;
     let prior_version = read_root_pointer(kinora_root, root_name)?;
 
     let ledger = Ledger::new(kinora_root);
@@ -583,6 +609,41 @@ mod tests {
         fs::write(root_pointer_path(&root, "main"), format!("{hash}\n")).unwrap();
         let got = read_root_pointer(&root, "main").unwrap().unwrap();
         assert_eq!(got.as_hex(), hash);
+    }
+
+    #[test]
+    fn invalid_root_name_rejected() {
+        let (_t, root) = setup();
+        for name in ["", ".", "..", "a/b", "dir/sub", "back\\slash"] {
+            let err =
+                compact(&root, name, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+            assert!(
+                matches!(err, CompactError::InvalidRootName { .. }),
+                "name {name:?} not rejected: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_head_reported_distinctly_from_multiple_heads() {
+        // Manufacture a degenerate event set where every event is someone's
+        // parent — no head exists. Since store_kino's validator rejects
+        // self-parents and missing-parents, construct events by hand and
+        // feed them to `build_root` directly.
+        let make = |hash: &str, parents: Vec<String>| Event {
+            kind: "markdown".into(),
+            id: "id".into(),
+            hash: hash.into(),
+            parents,
+            ts: "t".into(),
+            author: "a".into(),
+            provenance: "p".into(),
+            metadata: BTreeMap::new(),
+        };
+        let a = make(&"aa".repeat(32), vec!["bb".repeat(32)]);
+        let b = make(&"bb".repeat(32), vec!["aa".repeat(32)]);
+        let err = build_root(&[a, b]).unwrap_err();
+        assert!(matches!(err, CompactError::NoHead { .. }), "got: {err:?}");
     }
 
     #[test]
