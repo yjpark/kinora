@@ -58,16 +58,25 @@ impl ContentStore {
     /// a blob with that hash already exists under any extension, no new file
     /// is written and the existing path stands. Extensions are advisory UX
     /// — the authoritative `kind` lives in the ledger event.
+    ///
+    /// Tmp path is prefixed (`.tmp-<hash>.<ext>`) so a crashed write never
+    /// masquerades as a real blob when [`find_blob_path`] scans the shard
+    /// dir — the stem-is-hash invariant of on-disk blobs is preserved.
     pub fn write(&self, kind: &str, content: &[u8]) -> Result<Hash, StoreError> {
         let hash = Hash::of_content(content);
         if find_blob_path(&self.kinora_root, &hash).is_some() {
             return Ok(hash);
         }
-        let path = store_blob_path_with_ext(&self.kinora_root, &hash, ext_for_kind(kind));
+        let ext = ext_for_kind(kind);
+        let path = store_blob_path_with_ext(&self.kinora_root, &hash, ext);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("tmp");
+        let tmp_name = match ext {
+            Some(e) => format!(".tmp-{}.{e}", hash.as_hex()),
+            None => format!(".tmp-{}", hash.as_hex()),
+        };
+        let tmp = path.parent().expect("shard dir").join(tmp_name);
         fs::write(&tmp, content)?;
         fs::rename(&tmp, &path)?;
         Ok(hash)
@@ -245,6 +254,25 @@ mod tests {
         fs::write(&legacy_path, bytes).unwrap();
         let out = store.read(&hash).unwrap();
         assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn find_blob_path_ignores_stale_tmp_from_a_crashed_write() {
+        // A crashed write leaves `.tmp-<hash>.<ext>` in the shard dir. The
+        // stem-is-hash invariant means readers should not treat this as a
+        // real blob — `find_blob_path` splits on the first dot, so a tmp
+        // name whose stem is `<hash>` would falsely match.
+        let (_tmp, store) = store();
+        let hash = Hash::of_content(b"imminent");
+        let shard = store.root().join("store").join(hash.shard());
+        fs::create_dir_all(&shard).unwrap();
+        let stale = shard.join(format!(".tmp-{}.md", hash.as_hex()));
+        fs::write(&stale, b"partial").unwrap();
+        assert!(
+            find_blob_path(store.root(), &hash).is_none(),
+            "stale tmp file leaked through as a blob"
+        );
+        assert!(!store.exists(&hash));
     }
 
     #[test]
