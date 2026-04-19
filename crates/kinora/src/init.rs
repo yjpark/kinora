@@ -2,7 +2,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, ConfigError};
+use std::collections::BTreeMap;
+
+use crate::config::{Config, ConfigError, RootPolicy, DEFAULT_INBOX_POLICY};
 use crate::paths::{config_path, kinora_root, ledger_dir, store_dir};
 
 #[derive(Debug)]
@@ -60,7 +62,13 @@ pub fn init(repo_root: &Path, repo_url: &str) -> Result<Config, InitError> {
     fs::create_dir_all(&root)?;
     fs::create_dir_all(store_dir(&root))?;
     fs::create_dir_all(ledger_dir(&root))?;
-    let cfg = Config { repo_url: repo_url.to_owned() };
+    let cfg = Config {
+        repo_url: repo_url.to_owned(),
+        roots: BTreeMap::from([(
+            "inbox".to_owned(),
+            RootPolicy::MaxAge(DEFAULT_INBOX_POLICY.to_owned()),
+        )]),
+    };
     fs::write(config_path(&root), cfg.to_styx()?)?;
     Ok(cfg)
 }
@@ -122,6 +130,26 @@ mod tests {
         let text = fs::read_to_string(config_path(&kinora_root(tmp.path()))).unwrap();
         let parsed = Config::from_styx(&text).unwrap();
         assert_eq!(parsed.repo_url, "https://example.com/x.git");
+    }
+
+    #[test]
+    fn init_writes_explicit_inbox_root_block() {
+        let tmp = TempDir::new().unwrap();
+        init(tmp.path(), "https://example.com/x.git").unwrap();
+        let text = fs::read_to_string(config_path(&kinora_root(tmp.path()))).unwrap();
+        assert!(
+            text.contains("roots"),
+            "expected `roots` block in initial config.styx, got:\n{text}"
+        );
+        assert!(
+            text.contains("inbox"),
+            "expected inbox declaration in initial config.styx, got:\n{text}"
+        );
+        let parsed = Config::from_styx(&text).unwrap();
+        assert_eq!(
+            parsed.roots.get("inbox"),
+            Some(&RootPolicy::MaxAge(DEFAULT_INBOX_POLICY.to_owned()))
+        );
     }
 
     #[test]
