@@ -1,11 +1,11 @@
 ---
 # kinora-6395
 title: 'CLI: rename `lineage=…` wording for hot-ledger writes'
-status: in-progress
+status: completed
 type: task
 priority: low
 created_at: 2026-04-19T06:23:57Z
-updated_at: 2026-04-19T07:19:44Z
+updated_at: 2026-04-19T07:20:03Z
 parent: kinora-w7w0
 ---
 
@@ -31,3 +31,12 @@ Observed while completing kinora-ve9g.
 - [x] CLI print updated
 - [x] Integration/unit test asserts the new wording
 - [x] Docs/README reflects the new phrasing if it appears anywhere (README/docs checked — no occurrences)
+
+## Summary of Changes
+
+- CLI print for successful stores reworded from `lineage=<sh> (new lineage)` to `stored kind=<k> id=<id> hash=<h> event=<sh> (new event)`.
+- `(new event)` suffix only appears when `was_new_lineage=true` (i.e. the hot-ledger file was actually created); idempotent re-stores print no suffix.
+- Formatter extracted as `format_store_summary(&StoredKino) -> String` in `crates/kinora-cli/src/store.rs` so it can be unit-tested without running a real store.
+- Three new tests pin the wording: `format_store_summary_uses_event_wording_for_new_events`, `format_store_summary_omits_suffix_on_idempotent_restore`, `format_store_summary_has_expected_shape`.
+- `StoredKino.lineage` and `StoredKino.was_new_lineage` field names kept as-is for one release so programmatic callers (and their tests) aren't broken; deprecation documented inline in `crates/kinora/src/kino.rs`.
+- No docs/README changes needed — neither mentions "lineage" outside this bean's own history.
