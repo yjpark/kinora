@@ -8,7 +8,14 @@
       {
         pname = "kinora";
         src = ./.;
-        # extraDevPackages = pkgs: [ ];
+        extraDevPackages = pkgs: [
+          # `kinora` wrapper: always runs the current workspace source via
+          # `cargo run`. Cargo's mtime check skips compile when unchanged,
+          # so the overhead on repeat calls is negligible.
+          (pkgs.writeShellScriptBin "kinora" ''
+            exec cargo run --quiet -p kinora-cli -- "$@"
+          '')
+        ];
       }
       {
         rust = {
