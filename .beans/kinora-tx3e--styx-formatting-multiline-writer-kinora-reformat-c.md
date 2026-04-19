@@ -1,0 +1,116 @@
+---
+# kinora-tx3e
+title: 'Styx formatting: multiline writer + kinora reformat command'
+status: todo
+type: feature
+priority: normal
+created_at: 2026-04-19T15:12:02Z
+updated_at: 2026-04-19T15:29:55Z
+blocked_by:
+    - kinora-jezf
+---
+
+## Why
+
+Styx files in the store are currently serialized with `facet_styx::to_string()` (auto formatting). For our data shape — kinograph kinos with an `entries` sequence — auto formatting collapses everything onto a single line that routinely exceeds a screen width. Example: `.kinora/store/55/552d1f8c72db188415380fcc29e0bcfbd5159c4bc0825bb48631c79df76821d9.styx` is one ~2500-char line.
+
+Hard to read, hard to review in diffs, hard to debug. The fix is two parts:
+
+1. **Writer switch**: all `to_styx()` callers pass `FormatOptions::default().multiline()`. New files come out newline-per-field.
+2. **`kinora reformat` command**: for existing single-line files already in the store, walk them and stage new versions with reformatted content.
+
+Part 1 alone is a one-liner change per call site but doesn't touch existing stored blobs. Part 2 migrates them.
+
+## Part 1: writer switch
+
+Call sites to update:
+
+- `kinora/src/root.rs`: `RootKinograph::to_styx`
+- `kinora/src/kinograph.rs`: kinograph serialization
+- `kinora/src/config.rs`: `Config::to_styx`
+- (verify: grep for `facet_styx::to_string` and `to_styx` in the workspace)
+
+Use `FormatOptions::default().multiline()` at each site. Consider factoring into a single `kinora::styx::write(value)` helper so future tuning is one place.
+
+Users with hand-edited `config.styx` are unaffected — we only write via `to_styx` from `init` and related codepaths.
+
+## Part 2: `kinora reformat`
+
+### CLI shape
+
+```
+kinora reformat
+```
+
+Respects the global `--repo-root` / `-C` flag. No other args initially.
+
+### Semantics
+
+Reformat is a *staged hash rotation* over the styx subset of the graph:
+
+1. **Walk the reachable graph** from each root's current heads.
+2. **For each reachable kino of kind `kinograph`** (regular kinograph kinos):
+   - Read current content.
+   - Parse → re-serialize with the new multiline formatter.
+   - If the new bytes differ from the current bytes, stage a new-version event:
+     - id = original kino's id (preserves identity)
+     - version = hash of reformatted content
+     - parents = [current version]
+     - content = reformatted bytes
+3. **For each reachable kino of kind `root`** (root kinograph kinos): specialized pathway — root kinographs are produced by commit (not staged), so reformat writes the new multiline content directly to the store and updates the root's head pointer to reference it. Skip if re-serialized bytes match current bytes.
+4. **Skip markdown/text/other opaque kinds** — bytes are not styx, reformat doesn't apply. (User-driven content reformatting may be a separate feature later.)
+5. **Config.styx is not a kino** — handled by the Part 1 writer switch, nothing for reformat to do.
+
+### Why narrow scope works (no reference cascade)
+
+Kinograph entries carry `pin: false` by default, which means parent kinographs reference children by identity and follow heads. After the user runs `kinora commit`, the newly staged reformatted versions become the heads of each lineage, and parent kinographs automatically resolve to them — no need for reformat to also restage the parents.
+
+### Output
+
+Summary to stdout:
+- N styx kinos reformatted (staged)
+- M styx kinos already in target format (skipped)
+- Suggest next step: `kinora commit` to make the new versions heads
+
+### "Dry-run" via staging
+
+Staging without committing is itself the dry-run. Users can:
+- Inspect `.kinora/staged/` (or equivalent post-rename) to see the new events
+- Diff new vs old content manually
+- Commit when satisfied, or clear staged to abort
+
+No separate `--dry-run` flag is needed for end users. (If a developer-only preview mode becomes useful later, easy to add.)
+
+### Single-kino mode
+
+Deliberately not supported in the end-user CLI. Reformatting one kino in isolation produces a graph where only that kino has been updated — valid (parents head-track), but not generally useful. Could be useful as a developer debugging tool, but doesn't need to be in v1.
+
+## Depends on
+
+- `--repo-root` flag bean (kinora-jezf) — for consistent path plumbing across new commands
+- Rename bean (kinora-2t6l, hot→staged, compact→commit) — *soft* dependency; the staging pathway exists by either name. If rename lands first, reformat uses the new vocabulary natively.
+
+## Design decisions
+
+- **Reformat rewrites root kinographs too**, via a specialized pathway. Waiting for a future natural commit would leave root kinographs stale indefinitely if no new events land on a given root, which defeats the user-visible point of reformat. So reformat directly writes new multiline root-kinograph kinos and updates root head pointers. Regular kinograph kinos still flow through the normal staged-new-version mechanism.
+- **Idempotency**: skip any styx kino whose re-serialized bytes equal its current bytes. Running reformat twice on an already-multiline repo stages zero events and updates zero root pointers. Part of the summary output (`N skipped, already formatted`).
+
+## Todos
+
+- [ ] Add `kinora::styx::write` helper wrapping `facet_styx::to_string_with_options` with `FormatOptions::default().multiline()`
+- [ ] Replace all `to_styx` / `facet_styx::to_string` call sites with the helper
+- [ ] Verify new writes produce multiline output (unit test against a representative struct)
+- [ ] Design `reformat` command module in `kinora-cli` + `kinora::reformat` in the library
+- [ ] Implement graph walk + reformat detection
+- [ ] Implement staged-event emission (reuse existing assign-event plumbing)
+- [ ] Tests: reformat over a repo with mixed legacy + current-format kinos
+- [ ] Tests: reformat is idempotent (running twice on an already-multiline repo stages nothing)
+- [ ] Tests: after `kinora commit`, reformatted kinos are heads; `kinora render` picks them up
+- [ ] Update docs / command help
+
+## Acceptance
+
+- All new styx writes produce multiline output
+- `kinora reformat` on a repo with legacy single-line styx files stages new multiline versions; `kinora commit` lands them; `kinora render` shows unchanged user-visible output
+- Idempotent on already-multiline repos (zero staged events)
+- Zero compiler warnings, all tests pass

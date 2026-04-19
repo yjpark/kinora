@@ -46,13 +46,13 @@ pub struct StoreKinoParams {
 #[derive(Debug)]
 pub struct StoredKino {
     pub event: Event,
-    /// Shorthash of the event hash (first 8 hex chars). Under the hot-ledger
+    /// Shorthash of the event hash (first 8 hex chars). Under the staged-ledger
     /// layout (kinora-xi21) every event lives in its own file keyed by the
     /// event hash, so this is really the event shorthash. The field name is
     /// kept through one release for programmatic back-compat (kinora-6395);
     /// the CLI no longer surfaces the "lineage" wording.
     pub lineage: String,
-    /// True iff this event's hot-ledger file did not already exist — i.e.
+    /// True iff this event's staged-ledger file did not already exist — i.e.
     /// this call introduced a new event. Idempotent re-stores return false.
     /// Retained under the `was_new_lineage` name for back-compat with
     /// programmatic callers; semantically now "was a new event".
@@ -60,7 +60,7 @@ pub struct StoredKino {
 }
 
 /// Write `params.content` to the content store (deduped) and record the
-/// corresponding event in the hot ledger (`.kinora/hot/<ab>/<event-hash>.jsonl`).
+/// corresponding event in the staged ledger (`.kinora/staged/<ab>/<event-hash>.jsonl`).
 /// Idempotent at the event-hash level: re-storing the same logical event
 /// is a no-op on disk and returns `was_new_lineage=false`.
 #[fastrace::trace]
@@ -154,8 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn each_store_creates_a_distinct_hot_event_file() {
-        // Under the hot-ledger layout each event lives in its own file. Two
+    fn each_store_creates_a_distinct_staged_event_file() {
+        // Under the staged-ledger layout each event lives in its own file. Two
         // stores of different content produce two distinct event files, and
         // both events should be readable via `read_all_events`.
         let (_tmp, root) = setup();
@@ -253,7 +253,7 @@ mod tests {
 
         // Same content, different `ts` → different logical event → different
         // event hash → separate file. The content blob is deduped, but each
-        // event lives in its own hot file.
+        // event lives in its own staged file.
         let mut p = params("markdown", b"same");
         p.ts = "2026-04-18T10:00:01Z".into();
         let _second = store_kino(&root, p).unwrap();

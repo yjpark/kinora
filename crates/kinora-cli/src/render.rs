@@ -3,7 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kinora::cache_path::CachePath;
-use kinora::compact::read_root_pointer;
+use kinora::commit::read_root_pointer;
 use kinora::config::Config;
 use kinora::paths::{config_path, kinora_root, roots_dir};
 use kinora::render::{render, write_book};
@@ -77,7 +77,7 @@ fn resolve_cache_root(xdg: Option<&str>, home: Option<&str>) -> Result<PathBuf, 
 ///
 /// Scans `.kinora/roots/` pointer files; for each pointer, loads the
 /// referenced root kinograph blob and records every entry id under that
-/// root's name. Kinos that are not owned by any compacted root are left
+/// root's name. Kinos that are not owned by any committed root are left
 /// out — callers should fall back to a default label for them.
 fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError> {
     let mut owners: HashMap<String, String> = HashMap::new();
@@ -127,7 +127,7 @@ fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kinora::compact::{compact_root, CompactParams};
+    use kinora::commit::{commit_root, CommitParams};
     use kinora::init::init;
     use kinora::kino::{store_kino, StoreKinoParams};
     use std::collections::BTreeMap;
@@ -139,8 +139,8 @@ mod tests {
         tmp
     }
 
-    fn compact_params() -> CompactParams {
-        CompactParams {
+    fn commit_params() -> CommitParams {
+        CommitParams {
             author: "yj".into(),
             provenance: "test".into(),
             ts: "2026-04-19T10:00:00Z".into(),
@@ -298,7 +298,7 @@ mod tests {
         declare_main_root(&kin);
         let ev = store_kino(&kin, params(b"alpha", "alpha")).unwrap();
         assign_to(&kin, &ev.event.id, "main");
-        compact_root(&kin, "main", compact_params()).unwrap();
+        commit_root(&kin, "main", commit_params()).unwrap();
 
         // Simulate a leftover tmp pointer and a stray subdir under roots/.
         let roots = kin.join("roots");
@@ -321,7 +321,7 @@ mod tests {
         assign_to(&kin, &ev1.event.id, "main");
         assign_to(&kin, &ev2.event.id, "main");
 
-        compact_root(&kin, "main", compact_params()).unwrap();
+        commit_root(&kin, "main", commit_params()).unwrap();
 
         let owners = build_owners_map(&kin).unwrap();
         assert_eq!(owners.get(&ev1.event.id).map(String::as_str), Some("main"));
@@ -333,7 +333,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn render_pure_hot_repo_groups_under_unreferenced() {
+    fn render_pure_staged_repo_groups_under_unreferenced() {
         let tmp = repo();
         let kin = kinora_root(tmp.path());
         store_kino(&kin, params(b"# a\n", "alpha")).unwrap();
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn render_compacted_main_groups_under_main() {
+    fn render_committed_main_groups_under_main() {
         let tmp = repo();
         let kin = kinora_root(tmp.path());
         declare_main_root(&kin);
@@ -358,7 +358,7 @@ mod tests {
         let b = store_kino(&kin, params(b"# b\n", "beta")).unwrap();
         assign_to(&kin, &a.event.id, "main");
         assign_to(&kin, &b.event.id, "main");
-        compact_root(&kin, "main", compact_params()).unwrap();
+        commit_root(&kin, "main", commit_params()).unwrap();
 
         let cache = TempDir::new().unwrap();
         let args = RenderRunArgs {
@@ -379,9 +379,9 @@ mod tests {
         let b = store_kino(&kin, params(b"# b\n", "beta")).unwrap();
         assign_to(&kin, &a.event.id, "main");
         assign_to(&kin, &b.event.id, "main");
-        compact_root(&kin, "main", compact_params()).unwrap();
+        commit_root(&kin, "main", commit_params()).unwrap();
 
-        // Add a post-compact kino that isn't owned by any root yet.
+        // Add a post-commit kino that isn't owned by any root yet.
         store_kino(&kin, params(b"# c\n", "gamma")).unwrap();
 
         let cache = TempDir::new().unwrap();

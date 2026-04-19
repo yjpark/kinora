@@ -22,9 +22,9 @@ pub const META_TARGET_ROOT: &str = "kin::target_root";
 /// (optionally) a list of prior assign-event hashes this one supersedes.
 ///
 /// Assign events carry no content blob — they only reshape the kino→root
-/// graph. Phase 3.5 (kinora-7mou) teaches compact to consume them; until
-/// then they live in the hot ledger and are transparently ignored by
-/// content-store consumers (resolver, render, compact today) via
+/// graph. Phase 3.5 (kinora-7mou) teaches commit to consume them; until
+/// then they live in the staged ledger and are transparently ignored by
+/// content-store consumers (resolver, render, commit today) via
 /// `Event::is_store_event()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignEvent {
@@ -62,7 +62,7 @@ pub enum AssignError {
 
 impl AssignEvent {
     /// Convert to the on-wire `Event` form. Assign events reuse the `Event`
-    /// struct so they flow through the same hot-ledger write/read path as
+    /// struct so they flow through the same staged-ledger write/read path as
     /// store events. Field mapping:
     ///
     /// | Event field    | AssignEvent source                    |
@@ -146,7 +146,7 @@ impl AssignEvent {
     }
 }
 
-/// Write `a` to `.kinora/hot/<ab>/<event-hash>.jsonl`. Returns
+/// Write `a` to `.kinora/staged/<ab>/<event-hash>.jsonl`. Returns
 /// `(event_hash, was_new)` — `was_new` is true iff the target file did
 /// not exist before this call. Idempotent: re-writing the same logical
 /// assign event is a no-op.
@@ -324,13 +324,13 @@ mod tests {
     }
 
     #[test]
-    fn write_assign_creates_hot_event_file() {
+    fn write_assign_creates_staged_event_file() {
         let (_tmp, root) = setup();
         let a = sample();
         let (h, was_new) = write_assign(&root, &a).unwrap();
         assert!(was_new);
-        let path = crate::paths::hot_event_path(&root, &h);
-        assert!(path.is_file(), "hot event file missing: {}", path.display());
+        let path = crate::paths::staged_event_path(&root, &h);
+        assert!(path.is_file(), "staged event file missing: {}", path.display());
     }
 
     #[test]

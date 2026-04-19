@@ -33,7 +33,7 @@ pub struct RenderedPage {
     pub slug: String,
     /// Group label under which this page sits in the rendered book (e.g.
     /// a root-kinograph name like `main`, `rfcs`, or the fallback for
-    /// kinos not yet compacted into any root).
+    /// kinos not yet committed into any root).
     pub group: String,
     pub title: String,
     pub kind: String,
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn render_skips_root_kind_kinos() {
-        // A `root` kino represents a compacted root-kinograph blob. Those
+        // A `root` kino represents a committed root-kinograph blob. Those
         // shouldn't appear as rendered pages — only the leaves they enumerate.
         let (_t, root) = setup();
         store_kino(&root, params("markdown", b"body", "leaf")).unwrap();
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn forked_identity_is_surfaced_as_skipped_with_reason() {
-        // Under the hot-ledger layout every event has its own file, so a
+        // Under the staged-ledger layout every event has its own file, so a
         // fork is simply two sibling versions off the same parent — no HEAD
         // manipulation needed.
         let (_t, root) = setup();

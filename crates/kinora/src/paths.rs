@@ -8,8 +8,8 @@ pub const HEAD_FILE: &str = "HEAD";
 pub const STORE_DIR: &str = "store";
 pub const LEDGER_DIR: &str = "ledger";
 pub const LEDGER_EXT: &str = "jsonl";
-pub const HOT_DIR: &str = "hot";
-pub const HOT_EXT: &str = "jsonl";
+pub const STAGED_DIR: &str = "staged";
+pub const STAGED_EXT: &str = "jsonl";
 pub const ROOTS_DIR: &str = "roots";
 
 pub fn kinora_root(repo_root: &Path) -> PathBuf {
@@ -87,16 +87,16 @@ pub fn ledger_file_path(kinora_root: &Path, shorthash: &str) -> PathBuf {
     ledger_dir(kinora_root).join(format!("{shorthash}.{LEDGER_EXT}"))
 }
 
-pub fn hot_dir(kinora_root: &Path) -> PathBuf {
-    kinora_root.join(HOT_DIR)
+pub fn staged_dir(kinora_root: &Path) -> PathBuf {
+    kinora_root.join(STAGED_DIR)
 }
 
-/// One-file-per-event layout: `.kinora/hot/<ab>/<event-hash>.jsonl`.
+/// One-file-per-event layout: `.kinora/staged/<ab>/<event-hash>.jsonl`.
 /// Sharded by first two hex chars of the event hash (matches the store layout).
-pub fn hot_event_path(kinora_root: &Path, event_hash: &Hash) -> PathBuf {
-    hot_dir(kinora_root)
+pub fn staged_event_path(kinora_root: &Path, event_hash: &Hash) -> PathBuf {
+    staged_dir(kinora_root)
         .join(event_hash.shard())
-        .join(format!("{}.{HOT_EXT}", event_hash.as_hex()))
+        .join(format!("{}.{STAGED_EXT}", event_hash.as_hex()))
 }
 
 /// Directory housing root-kinograph pointer files. Each file in this directory
@@ -169,9 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn hot_dir_is_hot_subdir() {
+    fn staged_dir_is_staged_subdir_of_kinora_root() {
         let kin = kinora_root(&root());
-        assert_eq!(hot_dir(&kin), PathBuf::from("/repo/.kinora/hot"));
+        assert_eq!(staged_dir(&kin), PathBuf::from("/repo/.kinora/staged"));
     }
 
     #[test]
@@ -250,15 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn hot_event_path_shards_by_first_two_hex() {
+    fn staged_event_path_shards_by_first_two_hex() {
         let kin = kinora_root(&root());
         let h: Hash = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
             .parse()
             .unwrap();
         assert_eq!(
-            hot_event_path(&kin, &h),
+            staged_event_path(&kin, &h),
             PathBuf::from(
-                "/repo/.kinora/hot/af/af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262.jsonl"
+                "/repo/.kinora/staged/af/af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262.jsonl"
             )
         );
     }

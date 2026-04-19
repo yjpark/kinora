@@ -2,12 +2,12 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use kinora::author::resolve_author_from_git;
-use kinora::compact::{compact_all, CompactAllEntry, CompactError, CompactParams};
+use kinora::commit::{commit_all, CommitAllEntry, CommitError, CommitParams};
 use kinora::paths::kinora_root;
 
 use crate::common::{find_repo_root, CliError};
 
-pub const DEFAULT_PROVENANCE: &str = "compact";
+pub const DEFAULT_PROVENANCE: &str = "commit";
 
 const SHORTHASH_LEN: usize = 8;
 
@@ -15,29 +15,29 @@ fn short(hex: &str) -> &str {
     &hex[..hex.len().min(SHORTHASH_LEN)]
 }
 
-pub struct CompactRunArgs {
+pub struct CommitRunArgs {
     pub author: Option<String>,
     pub provenance: Option<String>,
 }
 
-/// Outcome of `kinora compact`: one entry per declared root in name
-/// order. The outer `Result` on `run_compact` is reserved for failures
+/// Outcome of `kinora commit`: one entry per declared root in name
+/// order. The outer `Result` on `run_commit` is reserved for failures
 /// before any root was visited (config load, author resolution); once
 /// iteration starts, per-root errors land in the entry itself so clean
 /// roots still advance to disk.
 #[derive(Debug)]
-pub struct CompactRunReport {
-    pub per_root: Vec<CompactAllEntry>,
+pub struct CommitRunReport {
+    pub per_root: Vec<CommitAllEntry>,
 }
 
-impl CompactRunReport {
-    /// True iff at least one root's compaction returned an `Err`.
+impl CommitRunReport {
+    /// True iff at least one root's commit returned an `Err`.
     pub fn any_error(&self) -> bool {
         self.per_root.iter().any(|(_, r)| r.is_err())
     }
 }
 
-pub fn run_compact(cwd: &Path, args: CompactRunArgs) -> Result<CompactRunReport, CliError> {
+pub fn run_commit(cwd: &Path, args: CommitRunArgs) -> Result<CommitRunReport, CliError> {
     let repo_root = find_repo_root(cwd)?;
     let kin_root = kinora_root(&repo_root);
 
@@ -48,14 +48,14 @@ pub fn run_compact(cwd: &Path, args: CompactRunArgs) -> Result<CompactRunReport,
     let provenance = args.provenance.unwrap_or_else(|| DEFAULT_PROVENANCE.to_owned());
     let ts = jiff::Timestamp::now().to_string();
 
-    let params = CompactParams { author, provenance, ts };
-    let per_root = compact_all(&kin_root, params)?;
-    Ok(CompactRunReport { per_root })
+    let params = CommitParams { author, provenance, ts };
+    let per_root = commit_all(&kin_root, params)?;
+    Ok(CommitRunReport { per_root })
 }
 
-/// Render a single per-root compact entry. Success cases render as a short
-/// `version=` line; failures fall through to `render_compact_error`.
-pub fn render_compact_entry<W: Write>(w: &mut W, entry: &CompactAllEntry) -> io::Result<()> {
+/// Render a single per-root commit entry. Success cases render as a short
+/// `version=` line; failures fall through to `render_commit_error`.
+pub fn render_commit_entry<W: Write>(w: &mut W, entry: &CommitAllEntry) -> io::Result<()> {
     let (name, result) = entry;
     match result {
         Ok(r) => {
@@ -77,7 +77,7 @@ pub fn render_compact_entry<W: Write>(w: &mut W, entry: &CompactAllEntry) -> io:
                 }
             }
         }
-        Err(e) => render_compact_error(w, name, e),
+        Err(e) => render_commit_error(w, name, e),
     }
 }
 
@@ -107,7 +107,7 @@ fn render_retention_hint(retained: &std::collections::BTreeMap<String, usize>) -
     )
 }
 
-/// Render a `CompactError` under a named root. `AmbiguousAssign` and
+/// Render a `CommitError` under a named root. `AmbiguousAssign` and
 /// `UnknownRoot` get the D2 multi-line format so the user sees the
 /// candidates and a copy-pasteable resolution hint; other variants fall
 /// back to a single `root=X ERROR: <display>` line.
@@ -115,13 +115,13 @@ fn render_retention_hint(retained: &std::collections::BTreeMap<String, usize>) -
 /// Note the intentional double-space after `root=<name>` for the two
 /// structured variants — matches the D2 mock-up in bean 7mou and flags
 /// these (fixable) config/user errors against the generic fallback.
-pub fn render_compact_error<W: Write>(
+pub fn render_commit_error<W: Write>(
     w: &mut W,
     root_name: &str,
-    err: &CompactError,
+    err: &CommitError,
 ) -> io::Result<()> {
     match err {
-        CompactError::AmbiguousAssign { kino_id, candidates } => {
+        CommitError::AmbiguousAssign { kino_id, candidates } => {
             writeln!(
                 w,
                 "root={root_name}  ERROR: ambiguous assigns for kino {}…",
@@ -154,7 +154,7 @@ pub fn render_compact_error<W: Write>(
                 short(kino_id),
             )?;
         }
-        CompactError::UnknownRoot { name, event_hash } => {
+        CommitError::UnknownRoot { name, event_hash } => {
             writeln!(
                 w,
                 "root={root_name}  ERROR: unknown root `{name}` referenced by assign event {}…",
@@ -188,8 +188,8 @@ mod tests {
         (tmp, root)
     }
 
-    fn args() -> CompactRunArgs {
-        CompactRunArgs {
+    fn args() -> CommitRunArgs {
+        CommitRunArgs {
             author: Some("YJ".into()),
             provenance: Some("cli-test".into()),
         }
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn run_compact_without_root_flag_compacts_every_declared_root() {
+    fn run_commit_without_root_flag_commits_every_declared_root() {
         let (tmp, kin) = repo();
         write_multi_root_config(&kin, &["main", "rfcs"]);
         // Assign one kino to main and one to rfcs so both advance to disk.
@@ -247,7 +247,7 @@ mod tests {
         assign_to(&kin, &a.id, "main");
         assign_to(&kin, &b.id, "rfcs");
 
-        let report = run_compact(tmp.path(), args()).unwrap();
+        let report = run_commit(tmp.path(), args()).unwrap();
         // inbox is auto-provisioned in Config::from_styx when absent.
         let names: Vec<_> = report.per_root.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(names, vec!["inbox", "main", "rfcs"]);
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn run_compact_any_error_flag_flips_when_one_root_fails() {
+    fn run_commit_any_error_flag_flips_when_one_root_fails() {
         let (tmp, kin) = repo();
         write_multi_root_config(&kin, &["main", "broken"]);
 
@@ -270,7 +270,7 @@ mod tests {
         .unwrap();
 
         store_md(&kin, b"x", "x");
-        let report = run_compact(tmp.path(), args()).unwrap();
+        let report = run_commit(tmp.path(), args()).unwrap();
         assert!(report.any_error(), "broken root should flip any_error");
         let by_name: std::collections::HashMap<_, _> = report
             .per_root
@@ -282,50 +282,50 @@ mod tests {
     }
 
     #[test]
-    fn run_compact_no_op_line_when_nothing_to_promote() {
+    fn run_commit_no_op_line_when_nothing_to_promote() {
         let (tmp, _kin) = repo();
-        // Default config has only `inbox`, and no hot events → no-op.
-        let report = run_compact(tmp.path(), args()).unwrap();
+        // Default config has only `inbox`, and no staged events → no-op.
+        let report = run_commit(tmp.path(), args()).unwrap();
         assert!(!report.any_error());
         assert_eq!(report.per_root.len(), 1);
         let (name, result) = &report.per_root[0];
         assert_eq!(name, "inbox");
         let r = result.as_ref().unwrap();
-        assert!(r.new_version.is_none(), "no hot events → no new version");
+        assert!(r.new_version.is_none(), "no staged events → no new version");
     }
 
     #[test]
-    fn run_compact_errors_outside_kinora_repo() {
+    fn run_commit_errors_outside_kinora_repo() {
         let tmp = TempDir::new().unwrap();
-        let err = run_compact(tmp.path(), args()).unwrap_err();
+        let err = run_commit(tmp.path(), args()).unwrap_err();
         assert!(matches!(err, CliError::NotInKinoraRepo { .. }));
     }
 
     #[test]
-    fn run_compact_errors_when_author_unresolved() {
+    fn run_commit_errors_when_author_unresolved() {
         let (tmp, _kin) = repo();
         let mut a = args();
         a.author = None;
-        let err = run_compact(tmp.path(), a).unwrap_err();
+        let err = run_commit(tmp.path(), a).unwrap_err();
         assert!(matches!(err, CliError::AuthorUnresolved));
     }
 
     #[test]
-    fn compact_subcommand_rejects_removed_root_flag() {
-        // Per D5 / hxmw-l79b, `--root` on `kinora compact` was retired.
+    fn commit_subcommand_rejects_removed_root_flag() {
+        // Per D5 / hxmw-l79b, `--root` on `kinora commit` was retired.
         // figue should reject the flag as unknown.
-        let outcome = figue::from_slice::<Cli>(&["compact", "--root", "main"]).into_result();
+        let outcome = figue::from_slice::<Cli>(&["commit", "--root", "main"]).into_result();
         assert!(
             outcome.is_err(),
-            "figue should reject --root on compact; got Ok(_)"
+            "figue should reject --root on commit; got Ok(_)"
         );
     }
 
     // ---- D2 CLI rendering for AmbiguousAssign / UnknownRoot ----
 
-    fn render_err(root_name: &str, err: &CompactError) -> String {
+    fn render_err(root_name: &str, err: &CommitError) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_error(&mut buf, root_name, err).unwrap();
+        render_commit_error(&mut buf, root_name, err).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -333,20 +333,20 @@ mod tests {
     fn ambiguous_assign_renders_d2_block_with_resolution_hint() {
         let kino_id = "a".repeat(64);
         let candidates = vec![
-            kinora::compact::AssignCandidate {
+            kinora::commit::AssignCandidate {
                 event_hash: format!("{}{}", "abc1", "0".repeat(60)),
                 target_root: "rfcs".into(),
                 author: "yj".into(),
                 ts: "2026-04-19T10:00:00Z".into(),
             },
-            kinora::compact::AssignCandidate {
+            kinora::commit::AssignCandidate {
                 event_hash: format!("{}{}", "def2", "0".repeat(60)),
                 target_root: "designs".into(),
                 author: "yj".into(),
                 ts: "2026-04-19T11:00:00Z".into(),
             },
         ];
-        let err = CompactError::AmbiguousAssign { kino_id: kino_id.clone(), candidates };
+        let err = CommitError::AmbiguousAssign { kino_id: kino_id.clone(), candidates };
         let out = render_err("rfcs", &err);
         let expected = "\
 root=rfcs  ERROR: ambiguous assigns for kino aaaaaaaa…
@@ -359,7 +359,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
 
     #[test]
     fn unknown_root_renders_single_line_with_offending_event() {
-        let err = CompactError::UnknownRoot {
+        let err = CommitError::UnknownRoot {
             name: "madeup".into(),
             event_hash: format!("{}{}", "xyz12345", "0".repeat(56)),
         };
@@ -371,8 +371,8 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
     }
 
     #[test]
-    fn other_compact_errors_fall_back_to_single_line_format() {
-        let err = CompactError::NoHead { id: "z".repeat(64) };
+    fn other_commit_errors_fall_back_to_single_line_format() {
+        let err = CommitError::NoHead { id: "z".repeat(64) };
         let out = render_err("main", &err);
         assert!(
             out.starts_with("root=main ERROR: "),
@@ -382,12 +382,12 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
     }
 
     #[test]
-    fn render_compact_entry_ok_with_new_version_uses_shorthash() {
+    fn render_commit_entry_ok_with_new_version_uses_shorthash() {
         use std::str::FromStr;
         let hash = kinora::hash::Hash::from_str(&"f".repeat(64)).unwrap();
-        let entry: CompactAllEntry = (
+        let entry: CommitAllEntry = (
             "main".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "main".into(),
                 new_version: Some(hash.clone()),
                 prior_version: None,
@@ -395,16 +395,16 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(out, format!("root=main version={} (new version)\n", hash.shorthash()));
     }
 
     #[test]
-    fn render_compact_entry_ok_no_op_with_no_prior_renders_dash() {
-        let entry: CompactAllEntry = (
+    fn render_commit_entry_ok_no_op_with_no_prior_renders_dash() {
+        let entry: CommitAllEntry = (
             "inbox".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "inbox".into(),
                 new_version: None,
                 prior_version: None,
@@ -412,18 +412,18 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(out, "root=inbox version=- (no-op)\n");
     }
 
     #[test]
-    fn render_compact_entry_appends_retention_hint_from_single_root() {
+    fn render_commit_entry_appends_retention_hint_from_single_root() {
         use std::str::FromStr;
         let hash = kinora::hash::Hash::from_str(&"a".repeat(64)).unwrap();
-        let entry: CompactAllEntry = (
+        let entry: CommitAllEntry = (
             "inbox".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "inbox".into(),
                 new_version: Some(hash.clone()),
                 prior_version: None,
@@ -433,7 +433,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             out,
@@ -445,12 +445,12 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
     }
 
     #[test]
-    fn render_compact_entry_appends_retention_hint_from_multiple_roots_sorted() {
+    fn render_commit_entry_appends_retention_hint_from_multiple_roots_sorted() {
         use std::str::FromStr;
         let hash = kinora::hash::Hash::from_str(&"b".repeat(64)).unwrap();
-        let entry: CompactAllEntry = (
+        let entry: CommitAllEntry = (
             "rfcs".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "rfcs".into(),
                 new_version: Some(hash.clone()),
                 prior_version: None,
@@ -461,7 +461,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             out,
@@ -473,12 +473,12 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
     }
 
     #[test]
-    fn render_compact_entry_retention_hint_uses_singular_for_one_entry() {
+    fn render_commit_entry_retention_hint_uses_singular_for_one_entry() {
         use std::str::FromStr;
         let hash = kinora::hash::Hash::from_str(&"c".repeat(64)).unwrap();
-        let entry: CompactAllEntry = (
+        let entry: CommitAllEntry = (
             "inbox".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "inbox".into(),
                 new_version: Some(hash.clone()),
                 prior_version: None,
@@ -488,7 +488,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("1 entry retained"),
@@ -497,10 +497,10 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
     }
 
     #[test]
-    fn render_compact_entry_retention_hint_attaches_to_no_op_too() {
-        let entry: CompactAllEntry = (
+    fn render_commit_entry_retention_hint_attaches_to_no_op_too() {
+        let entry: CommitAllEntry = (
             "inbox".into(),
-            Ok(kinora::compact::CompactResult {
+            Ok(kinora::commit::CommitResult {
                 root_name: "inbox".into(),
                 new_version: None,
                 prior_version: None,
@@ -510,7 +510,7 @@ to resolve: kinora assign aaaaaaaa… <root> --resolves abc10000…,def20000…
             }),
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_compact_entry(&mut buf, &entry).unwrap();
+        render_commit_entry(&mut buf, &entry).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             out,

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 
-/// Retention policy for a single root. Drives compaction-time GC in
+/// Retention policy for a single root. Drives commit-time GC in
 /// hxmw-6; this bean only lands the declarative primitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootPolicy {

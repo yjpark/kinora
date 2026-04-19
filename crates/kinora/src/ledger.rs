@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::event::{Event, EventError};
 use crate::hash::{Hash, SHORTHASH_LEN};
-use crate::paths::{head_path, hot_dir, hot_event_path, ledger_dir, ledger_file_path, HOT_EXT};
+use crate::paths::{head_path, staged_dir, staged_event_path, ledger_dir, ledger_file_path, STAGED_EXT};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
@@ -36,7 +36,7 @@ impl Ledger {
 
     pub fn ensure_layout(&self) -> Result<(), LedgerError> {
         fs::create_dir_all(ledger_dir(&self.kinora_root))?;
-        fs::create_dir_all(hot_dir(&self.kinora_root))?;
+        fs::create_dir_all(staged_dir(&self.kinora_root))?;
         Ok(())
     }
 
@@ -103,7 +103,7 @@ impl Ledger {
         read_events(&file)
     }
 
-    /// Write `event` to `.kinora/hot/<ab>/<event-hash>.jsonl`. Crash-atomic
+    /// Write `event` to `.kinora/staged/<ab>/<event-hash>.jsonl`. Crash-atomic
     /// via tmp+rename: a crash mid-write leaves an orphan tmp but never a
     /// truncated target, so a follow-up call always sees either a complete
     /// file or no file at all. Idempotent: if the target already exists
@@ -116,14 +116,14 @@ impl Ledger {
         self.ensure_layout()?;
         let line = event.to_json_line()?;
         let event_hash = Hash::of_content(line.as_bytes());
-        let path = hot_event_path(&self.kinora_root, &event_hash);
+        let path = staged_event_path(&self.kinora_root, &event_hash);
         if path.is_file() {
             return Ok((event_hash, false));
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension(format!("{HOT_EXT}.tmp"));
+        let tmp = path.with_extension(format!("{STAGED_EXT}.tmp"));
         {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(line.as_bytes())?;
@@ -133,13 +133,13 @@ impl Ledger {
         Ok((event_hash, true))
     }
 
-    /// Return every event stored under `.kinora/hot/`, deduped by event hash.
+    /// Return every event stored under `.kinora/staged/`, deduped by event hash.
     /// Does **not** read the legacy `.kinora/ledger/` layout — use
     /// `read_all_lineages` for that. Callers that need both should call both
     /// and merge.
     #[fastrace::trace]
     pub fn read_all_events(&self) -> Result<Vec<Event>, LedgerError> {
-        let dir = hot_dir(&self.kinora_root);
+        let dir = staged_dir(&self.kinora_root);
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -152,7 +152,7 @@ impl Ledger {
             }
             for entry in fs::read_dir(shard.path())? {
                 let path = entry?.path();
-                if path.extension().and_then(|e| e.to_str()) != Some(HOT_EXT) {
+                if path.extension().and_then(|e| e.to_str()) != Some(STAGED_EXT) {
                     continue;
                 }
                 for event in read_events(&path)? {
@@ -367,28 +367,28 @@ mod tests {
         assert_eq!(l.current_lineage().unwrap().as_deref(), Some("bbbbbbbb"));
     }
 
-    // ---- Hot-ledger tests (kinora-mjvb) ----
+    // ---- Staged-ledger tests (kinora-mjvb) ----
 
     #[test]
     fn write_event_creates_sharded_file_at_event_hash_path() {
         let (_t, l) = ledger();
-        let e = event("hot-first", "2026-04-19T09:00:00Z");
+        let e = event("staged-first", "2026-04-19T09:00:00Z");
         let expected = e.event_hash().unwrap();
         let (returned, was_new) = l.write_event(&e).unwrap();
         assert_eq!(returned, expected);
         assert!(was_new);
-        let path = hot_event_path(l.root(), &expected);
-        assert!(path.is_file(), "hot event file missing: {}", path.display());
+        let path = staged_event_path(l.root(), &expected);
+        assert!(path.is_file(), "staged event file missing: {}", path.display());
         // Sharded by the first two hex chars.
-        assert!(path.to_string_lossy().contains(&format!("/hot/{}/", expected.shard())));
+        assert!(path.to_string_lossy().contains(&format!("/staged/{}/", expected.shard())));
     }
 
     #[test]
     fn write_event_file_contains_exactly_one_line() {
         let (_t, l) = ledger();
-        let e = event("hot-one-line", "2026-04-19T09:00:00Z");
+        let e = event("staged-one-line", "2026-04-19T09:00:00Z");
         let (h, _) = l.write_event(&e).unwrap();
-        let contents = fs::read_to_string(hot_event_path(l.root(), &h)).unwrap();
+        let contents = fs::read_to_string(staged_event_path(l.root(), &h)).unwrap();
         assert!(contents.ends_with('\n'), "file should end with newline: {contents:?}");
         assert_eq!(contents.matches('\n').count(), 1, "expected one line: {contents:?}");
     }
@@ -405,9 +405,9 @@ mod tests {
     }
 
     #[test]
-    fn read_all_events_returns_empty_when_no_hot_dir() {
+    fn read_all_events_returns_empty_when_no_staged_dir() {
         let (_t, l) = ledger();
-        // ensure_layout() has been called in `ledger()`, but the hot dir may be
+        // ensure_layout() has been called in `ledger()`, but the staged dir may be
         // empty — verify this gives us an empty list, not an error.
         let got = l.read_all_events().unwrap();
         assert!(got.is_empty());
@@ -451,7 +451,7 @@ mod tests {
         let (_t, l) = ledger();
         let e = event("x", "2026-04-19T09:00:00Z");
         let (h, _) = l.write_event(&e).unwrap();
-        let shard = hot_dir(l.root()).join(h.shard());
+        let shard = staged_dir(l.root()).join(h.shard());
         fs::write(shard.join("junk.txt"), b"ignore me").unwrap();
         let got = l.read_all_events().unwrap();
         assert_eq!(got.len(), 1);
@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn cross_branch_merge_simulation_unions_files_without_conflict() {
         // Simulate two branches independently writing events. A set-union
-        // of their hot dirs (as git merge would produce) should yield the
+        // of their staged dirs (as git merge would produce) should yield the
         // union of events with no overlap issues.
         let base = TempDir::new().unwrap();
         let a_root = base.path().join("a");
@@ -477,11 +477,11 @@ mod tests {
         la.write_event(&ea).unwrap();
         lb.write_event(&eb).unwrap();
 
-        // "Merge" = copy both hot trees into the merged location.
+        // "Merge" = copy both staged trees into the merged location.
         let lm = Ledger::new(&merged);
         lm.ensure_layout().unwrap();
         for src in [&a_root, &b_root] {
-            copy_hot_tree(&hot_dir(src), &hot_dir(&merged));
+            copy_staged_tree(&staged_dir(src), &staged_dir(&merged));
         }
 
         let mut got = lm.read_all_events().unwrap();
@@ -494,7 +494,7 @@ mod tests {
         let (_t, l) = ledger();
         let e = event("tmp-cleanup", "2026-04-19T09:00:00Z");
         let (h, _) = l.write_event(&e).unwrap();
-        let shard = hot_dir(l.root()).join(h.shard());
+        let shard = staged_dir(l.root()).join(h.shard());
         let tmp = shard.join(format!("{}.jsonl.tmp", h.as_hex()));
         assert!(!tmp.exists(), "orphan tmp left behind: {}", tmp.display());
     }
@@ -506,7 +506,7 @@ mod tests {
         let (_t, l) = ledger();
         let e = event("recover", "2026-04-19T09:00:00Z");
         let event_hash = e.event_hash().unwrap();
-        let path = hot_event_path(l.root(), &event_hash);
+        let path = staged_event_path(l.root(), &event_hash);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let tmp = path.with_extension("jsonl.tmp");
         fs::write(&tmp, b"garbage from a crash").unwrap();
@@ -522,12 +522,12 @@ mod tests {
         let (_t, l) = ledger();
         let e = event("filename-shape", "2026-04-19T09:00:00Z");
         let (h, _) = l.write_event(&e).unwrap();
-        let path = hot_event_path(l.root(), &h);
+        let path = staged_event_path(l.root(), &h);
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(name, format!("{}.jsonl", h.as_hex()));
     }
 
-    fn copy_hot_tree(src: &Path, dst: &Path) {
+    fn copy_staged_tree(src: &Path, dst: &Path) {
         if !src.exists() {
             return;
         }

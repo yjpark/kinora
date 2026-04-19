@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use assign::{format_assign_summary, run_assign, AssignRunArgs};
 use cli::{Cli, Command};
-use compact::{render_compact_entry, run_compact, CompactRunArgs};
+use commit::{render_commit_entry, run_commit, CommitRunArgs};
 use fastrace::collector::{Config as FastraceConfig, ConsoleReporter, SpanContext};
 use fastrace::Span;
 use logforth::append::{FastraceEvent, Stderr};
@@ -21,7 +21,7 @@ use store::{format_store_summary, run_store, StoreRunArgs};
 mod assign;
 mod cli;
 mod common;
-mod compact;
+mod commit;
 mod render;
 mod resolve;
 mod store;
@@ -147,13 +147,13 @@ fn run() -> ExitCode {
                 Err(e) => report_err("render", e),
             }
         }
-        Command::Compact { author, provenance } => {
-            let args = CompactRunArgs { author, provenance };
-            match run_compact(&cwd, args) {
+        Command::Commit { author, provenance } => {
+            let args = CommitRunArgs { author, provenance };
+            match run_commit(&cwd, args) {
                 Ok(report) => {
                     let mut stdout = std::io::stdout().lock();
                     for entry in &report.per_root {
-                        let _ = render_compact_entry(&mut stdout, entry);
+                        let _ = render_commit_entry(&mut stdout, entry);
                     }
                     if report.any_error() {
                         ExitCode::FAILURE
@@ -161,7 +161,7 @@ fn run() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                 }
-                Err(e) => report_err("compact", e),
+                Err(e) => report_err("commit", e),
             }
         }
         Command::Resolve { name_or_id, version, all_heads } => {

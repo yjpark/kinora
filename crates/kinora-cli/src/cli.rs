@@ -57,14 +57,14 @@ pub enum Command {
         metadata: Vec<String>,
 
         /// Root to assign this kino to, as an atomic store+assign pair.
-        /// Omit to write only the store event — compaction will route the
+        /// Omit to write only the store event — commit will route the
         /// kino to the `inbox` root implicitly (phase 3.5).
         #[facet(args::named, default)]
         root: Option<String>,
     },
 
     /// Assign a kino to a named root. Writes a standalone `assign` event
-    /// to the hot ledger; compact (phase 3.5) consumes it to decide which
+    /// to the staged ledger; commit (phase 3.5) consumes it to decide which
     /// kinos render into which root.
     Assign {
         /// Either a 64-hex identity hash or a metadata `name`.
@@ -117,19 +117,19 @@ pub enum Command {
         all_heads: bool,
     },
 
-    /// Compact every root declared in `.kinora/config.styx` into a new
+    /// Commit every root declared in `.kinora/config.styx` into a new
     /// `kind: root` kinograph version. Reads every event under
-    /// `.kinora/hot/`, picks the head per identity per root, and stores
+    /// `.kinora/staged/`, picks the head per identity per root, and stores
     /// a canonical root blob per root, updating the pointer at
     /// `.kinora/roots/<name>`. Per-root errors don't short-circuit
     /// sibling roots — clean roots still advance. Exit is non-zero iff
     /// any root errored.
-    Compact {
+    Commit {
         /// Override author (defaults to `user.name` from git config).
         #[facet(args::named, default)]
         author: Option<String>,
 
-        /// Provenance of this compact run. Defaults to `compact`.
+        /// Provenance of this commit run. Defaults to `commit`.
         #[facet(args::named, default)]
         provenance: Option<String>,
     },

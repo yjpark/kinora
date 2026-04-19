@@ -1,7 +1,7 @@
 pub mod assign;
 pub mod author;
 pub mod cache_path;
-pub mod compact;
+pub mod commit;
 pub mod config;
 pub mod event;
 pub mod hash;

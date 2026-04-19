@@ -1,19 +1,19 @@
-//! Compaction: promote hot-ledger events into a `root` kinograph version.
+//! Commit: promote staged-ledger events into a `root` kinograph version.
 //!
-//! `compact_root(kinora_root, root_name, …)` reads every event under
-//! `.kinora/hot/`, picks the head version of each identity, and emits a
+//! `commit_root(kinora_root, root_name, …)` reads every event under
+//! `.kinora/staged/`, picks the head version of each identity, and emits a
 //! canonical `root`-kind kinograph whose entries inline the leaf view of
 //! each owned kino. The blob is stored and `.kinora/roots/<name>` is
 //! atomically rewritten to point at it.
 //!
-//! `compact_all(kinora_root, …)` is the batch driver: loads `config.styx`,
-//! iterates every declared root in name order, and calls `compact_root`
+//! `commit_all(kinora_root, …)` is the batch driver: loads `config.styx`,
+//! iterates every declared root in name order, and calls `commit_root`
 //! per-root. Per-root failures don't short-circuit — clean roots still
 //! advance to disk. Only a config read/parse failure surfaces as the
 //! outer `Err`.
 //!
-//! Determinism: two independent devs running `compact_root` over the
-//! same hot event set produce byte-identical root blobs.
+//! Determinism: two independent devs running `commit_root` over the
+//! same staged event set produce byte-identical root blobs.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -30,13 +30,13 @@ use crate::hash::{Hash, HashParseError};
 use crate::kino::{store_kino, StoreKinoError, StoreKinoParams};
 use crate::kinograph::{Kinograph, KinographError};
 use crate::ledger::{Ledger, LedgerError};
-use crate::paths::{config_path, hot_event_path, root_pointer_path, roots_dir};
+use crate::paths::{config_path, staged_event_path, root_pointer_path, roots_dir};
 use crate::root::{RootEntry, RootError, RootKinograph};
 use crate::store::{ContentStore, StoreError};
 
 /// A single live assign candidate surfaced in `AmbiguousAssign` so callers
 /// (notably the CLI) can render the D2 resolution hint without re-loading
-/// the hot ledger.
+/// the staged ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignCandidate {
     pub event_hash: String,
@@ -46,8 +46,8 @@ pub struct AssignCandidate {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CompactError {
-    #[error("compact io error: {0}")]
+pub enum CommitError {
+    #[error("commit io error: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Ledger(#[from] LedgerError),
@@ -71,7 +71,7 @@ pub enum CompactError {
         #[source]
         err: HashParseError,
     },
-    #[error("identity {id} has {} heads at compact time: {}", .heads.len(), .heads.join(", "))]
+    #[error("identity {id} has {} heads at commit time: {}", .heads.len(), .heads.join(", "))]
     MultipleHeads { id: String, heads: Vec<String> },
     #[error("identity {id} has no head (event graph cycle?)")]
     NoHead { id: String },
@@ -82,36 +82,36 @@ pub enum CompactError {
     #[error("invalid root name {name:?}: must be a single path component with no `/`, `\\`, or `..`")]
     InvalidRootName { name: String },
     /// A kino has two or more live (non-superseded) assign events pointing
-    /// at it. The compact cannot decide ownership; the user must author a
+    /// at it. The commit cannot decide ownership; the user must author a
     /// tie-breaking assign whose `supersedes` list names all candidates.
     #[error("ambiguous assigns for kino {kino_id}: {} live candidates", .candidates.len())]
     AmbiguousAssign { kino_id: String, candidates: Vec<AssignCandidate> },
     /// A live assign references a root name that is not declared in
-    /// `config.styx`. Raised during `compact_root` regardless of which
-    /// root is currently being compacted — an undeclared target is a
+    /// `config.styx`. Raised during `commit_root` regardless of which
+    /// root is currently being committed — an undeclared target is a
     /// config/user error that must be fixed globally.
     #[error("unknown root `{name}` referenced by assign event {event_hash}")]
     UnknownRoot { name: String, event_hash: String },
 }
 
-/// Inputs for a compact call. Mirrors the parts of `StoreKinoParams` that
+/// Inputs for a commit call. Mirrors the parts of `StoreKinoParams` that
 /// the root-kino event also needs.
 #[derive(Debug, Clone)]
-pub struct CompactParams {
+pub struct CommitParams {
     pub author: String,
     pub provenance: String,
     pub ts: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct CompactResult {
+pub struct CommitResult {
     pub root_name: String,
     /// Content hash of the newly stored root version. `None` iff the call
     /// was a no-op (either nothing to promote, or the new bytes matched the
     /// prior version byte-for-byte).
     pub new_version: Option<Hash>,
     pub prior_version: Option<Hash>,
-    /// Referencing-root → number of entries in the compacted root that
+    /// Referencing-root → number of entries in the committed root that
     /// survived policy-based GC solely because another root's composition
     /// kinograph pointed at them. Empty when no cross-root protection
     /// fired.
@@ -119,11 +119,11 @@ pub struct CompactResult {
 }
 
 /// Snapshot of cross-root composition references. Built once at the start
-/// of a compaction batch (or standalone compact) by walking every declared
-/// root's last-compacted root-kinograph and collecting the `(target_id,
+/// of a commit batch (or standalone commit) by walking every declared
+/// root's last-committed root-kinograph and collecting the `(target_id,
 /// target_version)` pointers that each composition kinograph entry names.
 ///
-/// Used during GC / hot-prune: any entry whose `(id, version)` appears as
+/// Used during GC / staged-prune: any entry whose `(id, version)` appears as
 /// a target is treated as implicitly pinned — protected from drop even
 /// when policy would otherwise evict it.
 #[derive(Debug, Default, Clone)]
@@ -142,7 +142,7 @@ impl ExternalRefs {
     ///
     /// The snapshot does not filter by self — query methods take
     /// `self_root` and drop references whose source equals it. That lets
-    /// `compact_all` compute this once per batch instead of once per
+    /// `commit_all` compute this once per batch instead of once per
     /// root.
     ///
     /// Unpinned composition entries resolve to the referenced id's head
@@ -150,7 +150,7 @@ impl ExternalRefs {
     /// events, fork) are skipped — cross-root integrity is best-effort.
     ///
     /// Any root pointer that cannot be resolved (missing blob, parse
-    /// failure) is silently skipped: that root's own per-root compact
+    /// failure) is silently skipped: that root's own per-root commit
     /// will surface the failure on its own, and cross-root integrity is
     /// a best-effort layer.
     #[fastrace::trace]
@@ -158,7 +158,7 @@ impl ExternalRefs {
         kinora_root: &Path,
         declared_roots: &BTreeSet<String>,
         events: &[Event],
-    ) -> Result<Self, CompactError> {
+    ) -> Result<Self, CommitError> {
         let store = ContentStore::new(kinora_root);
         let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
         let mut events_by_id: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
@@ -175,7 +175,7 @@ impl ExternalRefs {
                 Ok(None) => continue,
                 Err(e) => {
                     log::debug!(
-                        target: "kinora::compact::refs",
+                        target: "kinora::commit::refs",
                         source_root = source_root.as_str(),
                         error:% = e;
                         "skip root: unreadable pointer",
@@ -187,7 +187,7 @@ impl ExternalRefs {
                 Ok(b) => b,
                 Err(e) => {
                     log::debug!(
-                        target: "kinora::compact::refs",
+                        target: "kinora::commit::refs",
                         source_root = source_root.as_str(),
                         root_hash = root_ptr.as_hex(),
                         error:% = e;
@@ -200,7 +200,7 @@ impl ExternalRefs {
                 Ok(k) => k,
                 Err(e) => {
                     log::debug!(
-                        target: "kinora::compact::refs",
+                        target: "kinora::commit::refs",
                         source_root = source_root.as_str(),
                         root_hash = root_ptr.as_hex(),
                         error:% = e;
@@ -217,7 +217,7 @@ impl ExternalRefs {
                     Ok(h) => h,
                     Err(e) => {
                         log::debug!(
-                            target: "kinora::compact::refs",
+                            target: "kinora::commit::refs",
                             source_root = source_root.as_str(),
                             version = entry.version.as_str(),
                             error:% = e;
@@ -230,7 +230,7 @@ impl ExternalRefs {
                     Ok(b) => b,
                     Err(e) => {
                         log::debug!(
-                            target: "kinora::compact::refs",
+                            target: "kinora::commit::refs",
                             source_root = source_root.as_str(),
                             version = entry.version.as_str(),
                             error:% = e;
@@ -243,7 +243,7 @@ impl ExternalRefs {
                     Ok(k) => k,
                     Err(e) => {
                         log::debug!(
-                            target: "kinora::compact::refs",
+                            target: "kinora::commit::refs",
                             source_root = source_root.as_str(),
                             version = entry.version.as_str(),
                             error:% = e;
@@ -263,7 +263,7 @@ impl ExternalRefs {
                             Ok(head) => head.hash.clone(),
                             Err(e) => {
                                 log::debug!(
-                                    target: "kinora::compact::refs",
+                                    target: "kinora::commit::refs",
                                     source_root = source_root.as_str(),
                                     kino_id = comp.id.as_str(),
                                     error:% = e;
@@ -325,38 +325,38 @@ impl ExternalRefs {
 /// file lives at `.kinora/roots/<name>`, so a name with traversal pieces
 /// could escape the dir — block it defensively even though the CLI layer
 /// ought to hand us well-formed input.
-pub fn validate_root_name(name: &str) -> Result<(), CompactError> {
+pub fn validate_root_name(name: &str) -> Result<(), CommitError> {
     if name.is_empty()
         || name == "."
         || name == ".."
         || name.contains('/')
         || name.contains('\\')
     {
-        return Err(CompactError::InvalidRootName { name: name.to_owned() });
+        return Err(CommitError::InvalidRootName { name: name.to_owned() });
     }
     Ok(())
 }
 
 /// Read the current root pointer file. Returns `None` when the file does
-/// not yet exist (no compaction has happened for this root). The body is
+/// not yet exist (no commit has happened for this root). The body is
 /// expected to be exactly a 64-hex hash with no trailing whitespace.
 pub fn read_root_pointer(
     kinora_root: &Path,
     root_name: &str,
-) -> Result<Option<Hash>, CompactError> {
+) -> Result<Option<Hash>, CommitError> {
     validate_root_name(root_name)?;
     let path = root_pointer_path(kinora_root, root_name);
     match fs::read_to_string(&path) {
         Ok(body) => {
             let trimmed = body.trim_end_matches(['\r', '\n']);
-            let hash = Hash::from_str(trimmed).map_err(|_| CompactError::InvalidPointer {
+            let hash = Hash::from_str(trimmed).map_err(|_| CommitError::InvalidPointer {
                 path: path.clone(),
                 body,
             })?;
             Ok(Some(hash))
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(CompactError::Io(e)),
+        Err(e) => Err(CommitError::Io(e)),
     }
 }
 
@@ -367,7 +367,7 @@ fn write_root_pointer(
     kinora_root: &Path,
     root_name: &str,
     hash: &Hash,
-) -> Result<(), CompactError> {
+) -> Result<(), CommitError> {
     let dir = roots_dir(kinora_root);
     fs::create_dir_all(&dir)?;
     let path = root_pointer_path(kinora_root, root_name);
@@ -388,7 +388,7 @@ fn write_root_pointer(
 ///
 /// Only kinos routed to `root_name` are included in the returned kinograph.
 /// Errors from the routing pass (`AmbiguousAssign`, `UnknownRoot`) bubble up
-/// regardless of which root is being compacted — an undeclared target is a
+/// regardless of which root is being committed — an undeclared target is a
 /// global config/user problem that needs fixing before any root is clean.
 ///
 /// Events of kind `root` are skipped: a root kinograph represents the state
@@ -397,7 +397,7 @@ pub fn build_root(
     events: &[Event],
     root_name: &str,
     declared_roots: &BTreeSet<String>,
-) -> Result<RootKinograph, CompactError> {
+) -> Result<RootKinograph, CommitError> {
     let live_assigns = collect_live_assigns(events)?;
 
     let mut by_id: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
@@ -430,7 +430,7 @@ pub fn build_root(
     Ok(RootKinograph { entries })
 }
 
-/// Collect the live assign set from the hot event stream.
+/// Collect the live assign set from the staged event stream.
 ///
 /// An assign is **live** iff its event hash is not named in any other
 /// assign's `supersedes` list. Supersession is applied transitively via this
@@ -441,7 +441,7 @@ pub fn build_root(
 /// persistent assign identity in error payloads without re-hashing.
 fn collect_live_assigns(
     events: &[Event],
-) -> Result<Vec<(Hash, AssignEvent)>, CompactError> {
+) -> Result<Vec<(Hash, AssignEvent)>, CommitError> {
     let mut all: Vec<(Hash, AssignEvent)> = Vec::new();
     for e in events {
         if e.event_kind != EVENT_KIND_ASSIGN {
@@ -473,7 +473,7 @@ fn kino_target_root(
     kino_id: &str,
     live_assigns: &[(Hash, AssignEvent)],
     declared_roots: &BTreeSet<String>,
-) -> Result<Option<String>, CompactError> {
+) -> Result<Option<String>, CommitError> {
     let mine: Vec<&(Hash, AssignEvent)> = live_assigns
         .iter()
         .filter(|(_, a)| a.kino_id == kino_id)
@@ -483,7 +483,7 @@ fn kino_target_root(
         1 => {
             let (h, a) = mine[0];
             if !declared_roots.contains(&a.target_root) {
-                return Err(CompactError::UnknownRoot {
+                return Err(CommitError::UnknownRoot {
                     name: a.target_root.clone(),
                     event_hash: h.as_hex().to_owned(),
                 });
@@ -500,7 +500,7 @@ fn kino_target_root(
                     ts: a.ts.clone(),
                 })
                 .collect();
-            Err(CompactError::AmbiguousAssign {
+            Err(CommitError::AmbiguousAssign {
                 kino_id: kino_id.to_owned(),
                 candidates,
             })
@@ -508,7 +508,7 @@ fn kino_target_root(
     }
 }
 
-fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CompactError> {
+fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CommitError> {
     let referenced: HashSet<&str> = events
         .iter()
         .flat_map(|e| e.parents.iter().map(String::as_str))
@@ -520,15 +520,15 @@ fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CompactErr
         .collect();
     match heads.as_slice() {
         [only] => Ok(*only),
-        [] => Err(CompactError::NoHead { id: id.to_owned() }),
-        many => Err(CompactError::MultipleHeads {
+        [] => Err(CommitError::NoHead { id: id.to_owned() }),
+        many => Err(CommitError::MultipleHeads {
             id: id.to_owned(),
             heads: many.iter().map(|e| e.hash.clone()).collect(),
         }),
     }
 }
 
-/// Run a compaction pass for the named root.
+/// Run a commit pass for the named root.
 ///
 /// Genesis (no prior pointer): stores the new root as a birth event (`id`
 /// auto-set to the blob hash, empty `parents`).
@@ -536,14 +536,14 @@ fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CompactErr
 /// prior root's id and `parents` lists the prior version hash.
 ///
 /// No-op: returns `new_version = None` when either
-///  - no prior pointer exists AND there are no hot events to promote, or
+///  - no prior pointer exists AND there are no staged events to promote, or
 ///  - a prior pointer exists AND the fresh canonical bytes match it.
 #[fastrace::trace]
-pub fn compact_root(
+pub fn commit_root(
     kinora_root: &Path,
     root_name: &str,
-    params: CompactParams,
-) -> Result<CompactResult, CompactError> {
+    params: CommitParams,
+) -> Result<CommitResult, CommitError> {
     validate_root_name(root_name)?;
     let cfg_path = config_path(kinora_root);
     let cfg_text = fs::read_to_string(&cfg_path)?;
@@ -554,7 +554,7 @@ pub fn compact_root(
     let events = ledger.read_all_events()?;
 
     let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
-    compact_root_with_refs(
+    commit_root_with_refs(
         kinora_root,
         root_name,
         params,
@@ -565,21 +565,21 @@ pub fn compact_root(
     )
 }
 
-/// Inner compact helper that takes a precomputed `ExternalRefs` snapshot
-/// (built once per `compact_all` batch) and skips the config + event
-/// re-reads. Standalone `compact_root` calls wrap this with a per-call
+/// Inner commit helper that takes a precomputed `ExternalRefs` snapshot
+/// (built once per `commit_all` batch) and skips the config + event
+/// re-reads. Standalone `commit_root` calls wrap this with a per-call
 /// snapshot.
 #[fastrace::trace]
 #[allow(clippy::too_many_arguments)]
-fn compact_root_with_refs(
+fn commit_root_with_refs(
     kinora_root: &Path,
     root_name: &str,
-    params: CompactParams,
+    params: CommitParams,
     config: &Config,
     declared_roots: &BTreeSet<String>,
     events: &[Event],
     refs: &ExternalRefs,
-) -> Result<CompactResult, CompactError> {
+) -> Result<CommitResult, CommitError> {
     validate_root_name(root_name)?;
     let prior_version = read_root_pointer(kinora_root, root_name)?;
 
@@ -594,7 +594,7 @@ fn compact_root_with_refs(
     // Load prior root kinograph (if any) so we can carry pinned entries
     // forward. Pinned entries survive rebuilds verbatim for kinos still
     // owned by this root — this preserves hand-edits to the pin/version
-    // fields across compacts.
+    // fields across commits.
     let prior_root: Option<RootKinograph> = match &prior_version {
         Some(h) => Some(RootKinograph::parse(
             &ContentStore::new(kinora_root).read(h)?,
@@ -626,7 +626,7 @@ fn compact_root_with_refs(
         Some(prior) => {
             let prior_bytes = ContentStore::new(kinora_root).read(prior)?;
             if prior_bytes == new_bytes {
-                CompactResult {
+                CommitResult {
                     root_name: root_name.to_owned(),
                     new_version: None,
                     prior_version: prior_version.clone(),
@@ -636,7 +636,7 @@ fn compact_root_with_refs(
                 let prior_event = events
                     .iter()
                     .find(|e| e.hash == prior.as_hex())
-                    .ok_or_else(|| CompactError::PriorEventMissing {
+                    .ok_or_else(|| CommitError::PriorEventMissing {
                         version: prior.as_hex().to_owned(),
                     })?;
                 let stored = store_kino(
@@ -653,13 +653,13 @@ fn compact_root_with_refs(
                     },
                 )?;
                 let new_hash = Hash::from_str(&stored.event.hash).map_err(|err| {
-                    CompactError::InvalidHash {
+                    CommitError::InvalidHash {
                         value: stored.event.hash.clone(),
                         err,
                     }
                 })?;
                 write_root_pointer(kinora_root, root_name, &new_hash)?;
-                CompactResult {
+                CommitResult {
                     root_name: root_name.to_owned(),
                     new_version: Some(new_hash),
                     prior_version: prior_version.clone(),
@@ -669,7 +669,7 @@ fn compact_root_with_refs(
         }
         None => {
             if root.entries.is_empty() {
-                CompactResult {
+                CommitResult {
                     root_name: root_name.to_owned(),
                     new_version: None,
                     prior_version: None,
@@ -690,13 +690,13 @@ fn compact_root_with_refs(
                     },
                 )?;
                 let new_hash = Hash::from_str(&stored.event.hash).map_err(|err| {
-                    CompactError::InvalidHash {
+                    CommitError::InvalidHash {
                         value: stored.event.hash.clone(),
                         err,
                     }
                 })?;
                 write_root_pointer(kinora_root, root_name, &new_hash)?;
-                CompactResult {
+                CommitResult {
                     root_name: root_name.to_owned(),
                     new_version: Some(new_hash),
                     prior_version: None,
@@ -706,10 +706,10 @@ fn compact_root_with_refs(
         }
     };
 
-    // Prune hot events owned by this root per policy. Runs after the pointer
+    // Prune staged events owned by this root per policy. Runs after the pointer
     // write so a crash mid-prune leaves the ledger larger than strictly
     // required (safe) rather than smaller than the pointer can resolve.
-    prune_hot_events(
+    prune_staged_events(
         kinora_root,
         events,
         root_name,
@@ -755,7 +755,7 @@ fn propagate_pins(root: &mut RootKinograph, prior: Option<&RootKinograph>) {
 /// Drop root entries whose head ts is older than the `MaxAge` cutoff,
 /// unless the entry is pinned (explicitly or implicitly by a cross-root
 /// reference). No-op for `Never` and `KeepLastN` — `KeepLastN` acts on
-/// the hot ledger, not the root view (the root view already has at most
+/// the staged ledger, not the root view (the root view already has at most
 /// one entry per kino by `pick_head`).
 ///
 /// Returns a `referencing-root → count` map listing how many entries were
@@ -770,7 +770,7 @@ fn apply_root_entry_gc(
     now: &str,
     implicit_pinned: &BTreeSet<(String, String)>,
     refs: &ExternalRefs,
-) -> Result<BTreeMap<String, usize>, CompactError> {
+) -> Result<BTreeMap<String, usize>, CommitError> {
     let mut retained: BTreeMap<String, usize> = BTreeMap::new();
     let Some(max_age_s) = policy.max_age_seconds() else {
         return Ok(retained);
@@ -788,7 +788,7 @@ fn apply_root_entry_gc(
             return true;
         }
         let Some(head) = by_hash.get(entry.version.as_str()) else {
-            // Head missing from ledger — keep the entry. The hot ledger
+            // Head missing from ledger — keep the entry. The staged ledger
             // may have been externally trimmed; stay conservative rather
             // than evict on unverifiable state.
             return true;
@@ -797,7 +797,7 @@ fn apply_root_entry_gc(
             Ok(t) => t < cutoff,
             Err(e) => {
                 log::warn!(
-                    target: "kinora::compact::gc",
+                    target: "kinora::commit::gc",
                     root = root_name,
                     kino_id = entry.id.as_str(),
                     version = entry.version.as_str(),
@@ -829,19 +829,19 @@ fn apply_root_entry_gc(
 }
 
 /// Parse an RFC3339 timestamp into seconds-since-epoch. Errors are
-/// surfaced as `CompactError::Event` via `EventError::Parse`.
-fn parse_ts(s: &str) -> Result<i64, CompactError> {
+/// surfaced as `CommitError::Event` via `EventError::Parse`.
+fn parse_ts(s: &str) -> Result<i64, CommitError> {
     use std::str::FromStr;
     jiff::Timestamp::from_str(s)
         .map(|t| t.as_second())
         .map_err(|e| {
-            CompactError::Event(EventError::Parse(format!(
+            CommitError::Event(EventError::Parse(format!(
                 "invalid ts {s:?}: {e}"
             )))
         })
 }
 
-/// Prune hot events owned by `root_name` per `policy`.
+/// Prune staged events owned by `root_name` per `policy`.
 ///
 /// Ownership: a store event belongs to the root that its kino id routes
 /// to (via the live-assign graph, default inbox). An assign event belongs
@@ -849,15 +849,15 @@ fn parse_ts(s: &str) -> Result<i64, CompactError> {
 /// alongside the store events they used to route.
 ///
 /// Protections: (1) pinned versions named by root entries never drop, and
-/// neither does the hot event whose hash equals that version. (2) root-kind
-/// events never drop — they form the compact parent chain. (3) store
+/// neither does the staged event whose hash equals that version. (2) root-kind
+/// events never drop — they form the commit parent chain. (3) store
 /// events whose hash appears in a live-assign's target kino graph: we keep
 /// the pick_head event (the root's current view) implicitly because
 /// entries point at it and the content store still holds the blob; but on
 /// KeepLastN specifically we protect the head event from the N-window by
 /// always including it in the survivor set.
 #[allow(clippy::too_many_arguments)]
-fn prune_hot_events(
+fn prune_staged_events(
     kinora_root: &Path,
     events: &[Event],
     root_name: &str,
@@ -866,7 +866,7 @@ fn prune_hot_events(
     policy: &RootPolicy,
     now: &str,
     implicit_pinned: &BTreeSet<(String, String)>,
-) -> Result<(), CompactError> {
+) -> Result<(), CommitError> {
     if matches!(policy, RootPolicy::Never) {
         return Ok(());
     }
@@ -938,7 +938,7 @@ fn prune_hot_events(
                         Ok(t) => t,
                         Err(err) => {
                             log::warn!(
-                                target: "kinora::compact::prune",
+                                target: "kinora::commit::prune",
                                 root = root_name,
                                 kino_id = e.id.as_str(),
                                 hash = e.hash.as_str(),
@@ -961,7 +961,7 @@ fn prune_hot_events(
                     Ok(t) => t,
                     Err(err) => {
                         log::warn!(
-                            target: "kinora::compact::prune",
+                            target: "kinora::commit::prune",
                             root = root_name,
                             hash = e.hash.as_str(),
                             ts = e.ts.as_str(),
@@ -1000,26 +1000,26 @@ fn prune_hot_events(
     }
 
     for h in drop_hashes {
-        let path = hot_event_path(kinora_root, &h);
+        let path = staged_event_path(kinora_root, &h);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CompactError::Io(e)),
+            Err(e) => return Err(CommitError::Io(e)),
         }
     }
     Ok(())
 }
 
-/// One entry in the batch report produced by `compact_all`.
+/// One entry in the batch report produced by `commit_all`.
 ///
 /// The outer tuple pairs the root's declared name with the per-root
 /// outcome. A per-root `Err` surfaces the specific failure (e.g. a fork
 /// on one root) without aborting the batch.
-pub type CompactAllEntry = (String, Result<CompactResult, CompactError>);
+pub type CommitAllEntry = (String, Result<CommitResult, CommitError>);
 
-/// Compact every root declared in `config.styx`, in name order.
+/// Commit every root declared in `config.styx`, in name order.
 ///
-/// Reads the config once, then calls `compact_root` per declared root.
+/// Reads the config once, then calls `commit_root` per declared root.
 /// Per-root errors are collected into the returned `Vec` — they don't
 /// short-circuit the batch, so clean roots still advance to disk even
 /// when a sibling root is in a failing state (e.g. a fork).
@@ -1027,10 +1027,10 @@ pub type CompactAllEntry = (String, Result<CompactResult, CompactError>);
 /// The outer `Result::Err` is reserved for pre-iteration failures:
 /// config file missing, unreadable, or unparseable.
 #[fastrace::trace]
-pub fn compact_all(
+pub fn commit_all(
     kinora_root: &Path,
-    params: CompactParams,
-) -> Result<Vec<CompactAllEntry>, CompactError> {
+    params: CommitParams,
+) -> Result<Vec<CommitAllEntry>, CommitError> {
     let cfg_path = config_path(kinora_root);
     let cfg_text = fs::read_to_string(&cfg_path)?;
     let config = Config::from_styx(&cfg_text)?;
@@ -1040,14 +1040,14 @@ pub fn compact_all(
     let events = ledger.read_all_events()?;
 
     // Snapshot the cross-root composition pointers as they stand at batch
-    // start. Roots compacted earlier in this loop may produce new versions,
+    // start. Roots committed earlier in this loop may produce new versions,
     // but the snapshot-at-start is what every root in the batch evaluates
     // against — conservative and deterministic.
     let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
 
-    let mut out: Vec<CompactAllEntry> = Vec::with_capacity(config.roots.len());
+    let mut out: Vec<CommitAllEntry> = Vec::with_capacity(config.roots.len());
     for name in config.roots.keys() {
-        let result = compact_root_with_refs(
+        let result = commit_root_with_refs(
             kinora_root,
             name,
             params.clone(),
@@ -1077,10 +1077,10 @@ mod tests {
         (tmp, root)
     }
 
-    fn params(author: &str, ts: &str) -> CompactParams {
-        CompactParams {
+    fn params(author: &str, ts: &str) -> CommitParams {
+        CommitParams {
             author: author.into(),
-            provenance: "compact-test".into(),
+            provenance: "commit-test".into(),
             ts: ts.into(),
         }
     }
@@ -1092,7 +1092,7 @@ mod tests {
                 kind: "markdown".into(),
                 content: content.to_vec(),
                 author: "yj".into(),
-                provenance: "compact-test".into(),
+                provenance: "commit-test".into(),
                 ts: ts.into(),
                 metadata: BTreeMap::from([("name".into(), name.into())]),
                 id: None,
@@ -1110,7 +1110,7 @@ mod tests {
         store_md(&root, b"b", "b", "2026-04-19T10:00:01Z");
 
         let result =
-            compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+            commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:02Z")).unwrap();
         let hash = result.new_version.expect("new version on genesis");
         assert!(result.prior_version.is_none());
 
@@ -1122,18 +1122,18 @@ mod tests {
     }
 
     #[test]
-    fn subsequent_compaction_links_parent_and_bumps_version() {
+    fn subsequent_commit_links_parent_and_bumps_version() {
         let (_t, root) = setup();
         store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
 
-        let first = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
+        let first = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let prior = first.new_version.unwrap();
 
         // Add a second kino so the second root differs.
         store_md(&root, b"second", "other", "2026-04-19T10:00:02Z");
 
-        let second = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z"))
+        let second = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z"))
             .unwrap();
         assert_eq!(second.prior_version.as_ref(), Some(&prior));
         let new = second.new_version.expect("new version after update");
@@ -1154,17 +1154,17 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_no_op_when_nothing_new() {
+    fn commit_is_no_op_when_nothing_new() {
         let (_t, root) = setup();
         store_md(&root, b"one", "only", "2026-04-19T10:00:00Z");
-        let first = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
+        let first = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let first_version = first.new_version.unwrap();
 
         let pointer_before = fs::read(root_pointer_path(&root, "inbox")).unwrap();
 
-        // No new user events; different ts on the compact itself.
-        let second = compact_root(&root, "inbox", params("yj", "2026-04-19T10:05:00Z"))
+        // No new user events; different ts on the commit itself.
+        let second = commit_root(&root, "inbox", params("yj", "2026-04-19T10:05:00Z"))
             .unwrap();
         assert!(second.new_version.is_none(), "should be no-op");
         assert_eq!(second.prior_version.unwrap(), first_version);
@@ -1174,15 +1174,15 @@ mod tests {
     }
 
     #[test]
-    fn compact_ignores_non_store_events() {
-        // A hand-forged non-store event in the hot ledger must not appear
-        // in the compacted root. Compact only sees content-track events.
+    fn commit_ignores_non_store_events() {
+        // A hand-forged non-store event in the staged ledger must not appear
+        // in the committed root. Commit only sees content-track events.
         let (_t, root) = setup();
         store_md(&root, b"real", "doc", "2026-04-19T10:00:00Z");
 
         // Forge an event with a future/unknown event_kind. It is neither a
         // store event (so it must not land as a RootEntry) nor an assign
-        // (so it must not be interpreted as one either). Compact should
+        // (so it must not be interpreted as one either). Commit should
         // tolerate it and still produce a clean root.
         let forged = Event {
             event_kind: "future_kind".into(),
@@ -1197,9 +1197,9 @@ mod tests {
         };
         Ledger::new(&root).write_event(&forged).unwrap();
 
-        let result = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:05Z"))
+        let result = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:05Z"))
             .unwrap();
-        let hash = result.new_version.expect("expected compaction to succeed");
+        let hash = result.new_version.expect("expected commit to succeed");
         let bytes = ContentStore::new(&root).read(&hash).unwrap();
         let kinograph = RootKinograph::parse(&bytes).unwrap();
         assert!(
@@ -1209,9 +1209,9 @@ mod tests {
     }
 
     #[test]
-    fn compact_with_no_events_and_no_prior_is_no_op() {
+    fn commit_with_no_events_and_no_prior_is_no_op() {
         let (_t, root) = setup();
-        let result = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:00Z"))
+        let result = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:00Z"))
             .unwrap();
         assert!(result.new_version.is_none());
         assert!(result.prior_version.is_none());
@@ -1219,9 +1219,9 @@ mod tests {
     }
 
     #[test]
-    fn two_independent_compactions_produce_byte_identical_root_blobs() {
-        // Run the same logical compaction in two fresh repos with different
-        // compact author/ts/provenance — the root blob (content bytes) must
+    fn two_independent_commits_produce_byte_identical_root_blobs() {
+        // Run the same logical commit in two fresh repos with different
+        // commit author/ts/provenance — the root blob (content bytes) must
         // be byte-identical because it's derived purely from the user events.
         let mk = |root: &Path| {
             store_md(root, b"alpha", "a", "2026-04-19T10:00:00Z");
@@ -1232,17 +1232,17 @@ mod tests {
         let (_t1, root1) = setup();
         mk(&root1);
         let r1 =
-            compact_root(&root1, "inbox", params("alice", "2026-04-19T10:00:03Z"))
+            commit_root(&root1, "inbox", params("alice", "2026-04-19T10:00:03Z"))
                 .unwrap()
                 .new_version
                 .unwrap();
 
         let (_t2, root2) = setup();
         mk(&root2);
-        let r2 = compact_root(
+        let r2 = commit_root(
             &root2,
             "inbox",
-            CompactParams {
+            CommitParams {
                 author: "bob".into(),
                 provenance: "somewhere-else".into(),
                 ts: "2026-04-20T11:11:11Z".into(),
@@ -1265,7 +1265,7 @@ mod tests {
         let b = store_md(&root, b"bb", "n2", "2026-04-19T10:00:01Z");
         let c = store_md(&root, b"cc", "n3", "2026-04-19T10:00:02Z");
 
-        let result = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:10Z"))
+        let result = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:10Z"))
             .unwrap();
         let blob = ContentStore::new(&root)
             .read(&result.new_version.unwrap())
@@ -1281,7 +1281,7 @@ mod tests {
     fn pointer_file_is_exactly_64_hex_no_trailing_whitespace() {
         let (_t, root) = setup();
         store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
-        let result = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
+        let result = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
             .unwrap();
         let hash = result.new_version.unwrap();
         let pointer = fs::read_to_string(root_pointer_path(&root, "inbox")).unwrap();
@@ -1295,15 +1295,15 @@ mod tests {
 
     #[test]
     fn version_bump_keeps_three_entries_with_one_bumped() {
-        // Store 3 kinos → compact (3 entries). Then update one to v2 and
-        // compact again — root should still have 3 entries, with one
+        // Store 3 kinos → commit (3 entries). Then update one to v2 and
+        // commit again — root should still have 3 entries, with one
         // entry's `version` bumped to the v2 hash.
         let (_t, root) = setup();
         let a = store_md(&root, b"a", "a", "2026-04-19T10:00:00Z");
         let b = store_md(&root, b"b", "b", "2026-04-19T10:00:01Z");
         let c = store_md(&root, b"c", "c", "2026-04-19T10:00:02Z");
 
-        let first = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z"))
+        let first = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z"))
             .unwrap();
         let first_blob = ContentStore::new(&root)
             .read(&first.new_version.unwrap())
@@ -1318,7 +1318,7 @@ mod tests {
                 kind: "markdown".into(),
                 content: b"b2".to_vec(),
                 author: "yj".into(),
-                provenance: "compact-test".into(),
+                provenance: "commit-test".into(),
                 ts: "2026-04-19T10:00:10Z".into(),
                 metadata: BTreeMap::from([("name".into(), "b".into())]),
                 id: Some(b.id.clone()),
@@ -1327,7 +1327,7 @@ mod tests {
         )
         .unwrap();
 
-        let second = compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:11Z"))
+        let second = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:11Z"))
             .unwrap();
         let second_blob = ContentStore::new(&root)
             .read(&second.new_version.unwrap())
@@ -1367,7 +1367,7 @@ mod tests {
         fs::create_dir_all(roots_dir(&root)).unwrap();
         fs::write(root_pointer_path(&root, "inbox"), "not-a-hash").unwrap();
         let err = read_root_pointer(&root, "inbox").unwrap_err();
-        assert!(matches!(err, CompactError::InvalidPointer { .. }), "got: {err:?}");
+        assert!(matches!(err, CommitError::InvalidPointer { .. }), "got: {err:?}");
     }
 
     #[test]
@@ -1387,9 +1387,9 @@ mod tests {
         let (_t, root) = setup();
         for name in ["", ".", "..", "a/b", "dir/sub", "back\\slash"] {
             let err =
-                compact_root(&root, name, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+                commit_root(&root, name, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
             assert!(
-                matches!(err, CompactError::InvalidRootName { .. }),
+                matches!(err, CommitError::InvalidRootName { .. }),
                 "name {name:?} not rejected: {err:?}"
             );
         }
@@ -1415,12 +1415,12 @@ mod tests {
         let b = make(&"bb".repeat(32), vec!["aa".repeat(32)]);
         let declared: BTreeSet<String> = BTreeSet::from(["inbox".to_owned()]);
         let err = build_root(&[a, b], "inbox", &declared).unwrap_err();
-        assert!(matches!(err, CompactError::NoHead { .. }), "got: {err:?}");
+        assert!(matches!(err, CommitError::NoHead { .. }), "got: {err:?}");
     }
 
     #[test]
     fn fork_rejected_as_multiple_heads() {
-        // Two sibling versions off the same parent → fork. Compaction must
+        // Two sibling versions off the same parent → fork. Commit must
         // refuse; assign events (phase 3) are the supported way to pick a
         // winner.
         let (_t, root) = setup();
@@ -1436,7 +1436,7 @@ mod tests {
                     kind: "markdown".into(),
                     content: content.to_vec(),
                     author: "yj".into(),
-                    provenance: "compact-test".into(),
+                    provenance: "commit-test".into(),
                     ts: ts.into(),
                     metadata: BTreeMap::from([("name".into(), "doc".into())]),
                     id: Some(birth.id.clone()),
@@ -1447,12 +1447,12 @@ mod tests {
         }
 
         let err =
-            compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:10Z")).unwrap_err();
-        assert!(matches!(err, CompactError::MultipleHeads { .. }), "got: {err:?}");
+            commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:10Z")).unwrap_err();
+        assert!(matches!(err, CommitError::MultipleHeads { .. }), "got: {err:?}");
     }
 
     // ------------------------------------------------------------------
-    // compact_all (batch driver)
+    // commit_all (batch driver)
     // ------------------------------------------------------------------
 
     fn write_config(kin_root: &Path, body: &str) {
@@ -1460,10 +1460,10 @@ mod tests {
     }
 
     #[test]
-    fn compact_all_iterates_every_declared_root_in_name_order() {
+    fn commit_all_iterates_every_declared_root_in_name_order() {
         let (_t, root) = setup();
         // init writes a config with just `inbox`. Overwrite with three roots
-        // listed out of alphabetical order in the file — compact_all should
+        // listed out of alphabetical order in the file — commit_all should
         // normalize to sorted order.
         write_config(
             &root,
@@ -1478,18 +1478,18 @@ roots {
 
         store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
 
-        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
+        let entries = commit_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
         let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
         // `inbox` is auto-provisioned by Config::from_styx when absent.
         assert_eq!(names, vec!["alpha", "inbox", "main", "zeta"]);
         assert!(
             entries.iter().all(|(_, r)| r.is_ok()),
-            "every root should have compacted cleanly: {entries:?}"
+            "every root should have committed cleanly: {entries:?}"
         );
     }
 
     #[test]
-    fn compact_all_per_root_errors_do_not_short_circuit_clean_roots() {
+    fn commit_all_per_root_errors_do_not_short_circuit_clean_roots() {
         let (_t, root) = setup();
         write_config(
             &root,
@@ -1503,7 +1503,7 @@ roots {
         );
 
         // Pre-populate `forked`'s pointer with a hash that isn't in the
-        // content store — compact_root will fail to read the prior blob
+        // content store — commit_root will fail to read the prior blob
         // for byte-comparison. main and clean each get an explicit assign
         // so they produce non-empty root kinographs and must still advance
         // to disk despite the sibling failure.
@@ -1516,7 +1516,7 @@ roots {
         write_assign_for(&root, &km.id, "main", vec![], "2026-04-19T10:00:01Z");
         write_assign_for(&root, &kc.id, "clean", vec![], "2026-04-19T10:00:02Z");
 
-        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:03Z")).unwrap();
+        let entries = commit_all(&root, params("yj", "2026-04-19T10:00:03Z")).unwrap();
         let by_name: std::collections::HashMap<_, _> = entries
             .iter()
             .map(|(n, r)| (n.clone(), r))
@@ -1536,34 +1536,34 @@ roots {
     }
 
     #[test]
-    fn compact_all_surfaces_config_errors_as_outer_err() {
+    fn commit_all_surfaces_config_errors_as_outer_err() {
         let (_t, root) = setup();
         // Overwrite with an unparseable config.
         write_config(&root, "this is not valid styx {{{");
-        let err = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+        let err = commit_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
         assert!(
-            matches!(err, CompactError::Config(_)),
+            matches!(err, CommitError::Config(_)),
             "config parse failure should be outer Err: {err:?}"
         );
     }
 
     #[test]
-    fn compact_all_surfaces_missing_config_as_outer_err() {
+    fn commit_all_surfaces_missing_config_as_outer_err() {
         let (_t, root) = setup();
         fs::remove_file(config_path(&root)).unwrap();
-        let err = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
+        let err = commit_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap_err();
         assert!(
-            matches!(err, CompactError::Io(_)),
+            matches!(err, CommitError::Io(_)),
             "missing config.styx should be outer Err: {err:?}"
         );
     }
 
     #[test]
-    fn compact_all_emits_no_op_entry_when_root_has_nothing_to_promote() {
-        // Default init config has only `inbox`. No hot events → compact_all
+    fn commit_all_emits_no_op_entry_when_root_has_nothing_to_promote() {
+        // Default init config has only `inbox`. No staged events → commit_all
         // should still visit inbox and emit a no-op entry.
         let (_t, root) = setup();
-        let entries = compact_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let entries = commit_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap();
         assert_eq!(entries.len(), 1);
         let (name, result) = &entries[0];
         assert_eq!(name, "inbox");
@@ -1573,7 +1573,7 @@ roots {
     }
 
     // ------------------------------------------------------------------
-    // 7mou: compact consumes assigns + AmbiguousAssign + UnknownRoot
+    // 7mou: commit consumes assigns + AmbiguousAssign + UnknownRoot
     // ------------------------------------------------------------------
 
     fn write_assign_for(
@@ -1589,7 +1589,7 @@ roots {
             supersedes,
             author: "yj".into(),
             ts: ts.to_owned(),
-            provenance: "compact-test".into(),
+            provenance: "commit-test".into(),
         };
         let (h, _) = crate::assign::write_assign(kin, &a).unwrap();
         h
@@ -1618,12 +1618,12 @@ roots {
 
         // rfcs gets the kino; inbox does not.
         let rfcs_res =
-            compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:02Z")).unwrap();
         let rfcs_ids = root_ids(&root, &rfcs_res.new_version.unwrap());
         assert_eq!(rfcs_ids, vec![k.id.clone()], "rfcs should own the kino");
 
         let inbox_res =
-            compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z")).unwrap();
+            commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z")).unwrap();
         assert!(
             inbox_res.new_version.is_none(),
             "inbox should be empty (no-op) since the kino is routed to rfcs"
@@ -1645,12 +1645,12 @@ roots {
         let k = store_md(&root, b"x", "x", "2026-04-19T10:00:00Z");
 
         let inbox_res =
-            compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z")).unwrap();
+            commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z")).unwrap();
         let inbox_ids = root_ids(&root, &inbox_res.new_version.unwrap());
         assert_eq!(inbox_ids, vec![k.id.clone()], "unassigned kino should land in inbox");
 
         let main_res =
-            compact_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+            commit_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
         assert!(
             main_res.new_version.is_none(),
             "main should be no-op; unassigned kinos do not implicitly land there"
@@ -1682,12 +1682,12 @@ roots {
         );
 
         let designs_res =
-            compact_root(&root, "designs", params("yj", "2026-04-19T10:00:03Z")).unwrap();
+            commit_root(&root, "designs", params("yj", "2026-04-19T10:00:03Z")).unwrap();
         let designs_ids = root_ids(&root, &designs_res.new_version.unwrap());
         assert_eq!(designs_ids, vec![k.id.clone()], "designs wins after supersede");
 
         let rfcs_res =
-            compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:04Z")).unwrap();
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:04Z")).unwrap();
         assert!(
             rfcs_res.new_version.is_none(),
             "rfcs should be no-op; its live assign was superseded"
@@ -1726,14 +1726,14 @@ roots {
             "2026-04-19T10:00:03Z",
         );
 
-        let c_res = compact_root(&root, "c", params("yj", "2026-04-19T10:00:04Z")).unwrap();
+        let c_res = commit_root(&root, "c", params("yj", "2026-04-19T10:00:04Z")).unwrap();
         let c_ids = root_ids(&root, &c_res.new_version.unwrap());
         assert_eq!(c_ids, vec![k.id.clone()]);
 
-        let a_res = compact_root(&root, "a", params("yj", "2026-04-19T10:00:05Z")).unwrap();
+        let a_res = commit_root(&root, "a", params("yj", "2026-04-19T10:00:05Z")).unwrap();
         assert!(a_res.new_version.is_none(), "a's assign was superseded");
 
-        let b_res = compact_root(&root, "b", params("yj", "2026-04-19T10:00:06Z")).unwrap();
+        let b_res = commit_root(&root, "b", params("yj", "2026-04-19T10:00:06Z")).unwrap();
         assert!(b_res.new_version.is_none(), "b's assign was superseded");
     }
 
@@ -1756,9 +1756,9 @@ roots {
             write_assign_for(&root, &k.id, "designs", vec![], "2026-04-19T10:00:02Z");
 
         let err =
-            compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:03Z")).unwrap_err();
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:03Z")).unwrap_err();
         match err {
-            CompactError::AmbiguousAssign { kino_id, candidates } => {
+            CommitError::AmbiguousAssign { kino_id, candidates } => {
                 assert_eq!(kino_id, k.id);
                 assert_eq!(candidates.len(), 2, "should surface both live candidates");
                 let hashes: HashSet<_> =
@@ -1783,9 +1783,9 @@ roots {
             write_assign_for(&root, &k.id, "madeup", vec![], "2026-04-19T10:00:01Z");
 
         let err =
-            compact_root(&root, "inbox", params("yj", "2026-04-19T10:00:02Z")).unwrap_err();
+            commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:02Z")).unwrap_err();
         match err {
-            CompactError::UnknownRoot { name, event_hash } => {
+            CommitError::UnknownRoot { name, event_hash } => {
                 assert_eq!(name, "madeup");
                 assert_eq!(event_hash, h.as_hex());
             }
@@ -1810,7 +1810,7 @@ roots {
         let k = store_md(&root, b"doc", "doc", "2026-04-19T10:00:00Z");
         write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
 
-        let first = compact_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+        let first = commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
         let by_name: std::collections::HashMap<_, _> =
             first.into_iter().collect();
         let main_v1 = by_name["main"].as_ref().unwrap().new_version.clone().unwrap();
@@ -1833,8 +1833,8 @@ roots {
             "2026-04-19T10:00:03Z",
         );
 
-        // Re-compact both roots. Main should drop the kino; rfcs should gain it.
-        let second = compact_all(&root, params("yj", "2026-04-19T10:00:04Z")).unwrap();
+        // Re-commit both roots. Main should drop the kino; rfcs should gain it.
+        let second = commit_all(&root, params("yj", "2026-04-19T10:00:04Z")).unwrap();
         let by_name: std::collections::HashMap<_, _> =
             second.into_iter().collect();
 
@@ -1854,7 +1854,7 @@ roots {
     #[test]
     fn ambiguous_assign_candidates_carry_author_and_ts() {
         // The rendered D2 hint needs author + ts per candidate; check the
-        // CompactError payload carries them through.
+        // CommitError payload carries them through.
         let (_t, root) = setup();
         write_config(
             &root,
@@ -1870,9 +1870,9 @@ roots {
         write_assign_for(&root, &k.id, "designs", vec![], "2026-04-19T10:00:02Z");
 
         let err =
-            compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:03Z")).unwrap_err();
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:03Z")).unwrap_err();
         let candidates = match err {
-            CompactError::AmbiguousAssign { candidates, .. } => candidates,
+            CommitError::AmbiguousAssign { candidates, .. } => candidates,
             other => panic!("expected AmbiguousAssign, got {other:?}"),
         };
         assert!(candidates.iter().all(|c| c.author == "yj"));
@@ -1885,14 +1885,14 @@ roots {
     // mngq: GC / prune / pin (per-policy)
     // ------------------------------------------------------------------
 
-    use crate::paths::{hot_dir, hot_event_path};
+    use crate::paths::{staged_dir, staged_event_path};
 
     /// Replace the prior root pointer with a new root kinograph that pins
     /// the entry for `kino_id` to the given `version` hash. Writes the new
     /// blob to the content store, authors a root store event linked to the
     /// prior version via `parents`, and points `.kinora/roots/<name>` at
     /// the new version. Mirrors what a user hand-editing the root to add a
-    /// pin would produce, so subsequent `compact_root` calls see the pin.
+    /// pin would produce, so subsequent `commit_root` calls see the pin.
     fn overwrite_root_with_pin(
         kin: &Path,
         root_name: &str,
@@ -1934,9 +1934,9 @@ roots {
         new_hash
     }
 
-    /// Count hot event files on disk.
-    fn hot_event_count(kin: &Path) -> usize {
-        let dir = hot_dir(kin);
+    /// Count staged event files on disk.
+    fn staged_event_count(kin: &Path) -> usize {
+        let dir = staged_dir(kin);
         if !dir.exists() {
             return 0;
         }
@@ -1956,15 +1956,15 @@ roots {
         n
     }
 
-    /// True iff the hot event file for the given event exists.
+    /// True iff the staged event file for the given event exists.
     ///
-    /// Hot events are keyed by `event.event_hash()` (BLAKE3 of the JSON line),
+    /// Staged events are keyed by `event.event_hash()` (BLAKE3 of the JSON line),
     /// NOT by `event.hash` (the content/blob hash). Tests that want to assert
     /// on ledger presence must use this helper rather than comparing
     /// `event.hash` against directory listings.
-    fn hot_event_exists(kin: &Path, event: &Event) -> bool {
+    fn staged_event_exists(kin: &Path, event: &Event) -> bool {
         let h = event.event_hash().unwrap();
-        hot_event_path(kin, &h).is_file()
+        staged_event_path(kin, &h).is_file()
     }
 
     /// Store `n` successive versions of a kino under a single id chain.
@@ -2011,7 +2011,7 @@ roots {
         // An assign routes it to rfcs. Content ts is 2 years in the past.
         let k = store_md(&root, b"v", "v", "2024-04-19T10:00:00Z");
         write_assign_for(&root, &k.id, "rfcs", vec![], "2024-04-19T10:00:01Z");
-        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let res = commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let ids = root_ids(&root, &res.new_version.unwrap());
         assert_eq!(ids, vec![k.id], "Never must not drop any entry");
     }
@@ -2032,7 +2032,7 @@ roots {
         let fresh = store_md(&root, b"fresh", "fresh", "2026-04-13T10:00:00Z"); // 6d < now
         write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-11T10:00:01Z");
         write_assign_for(&root, &fresh.id, "rfcs", vec![], "2026-04-13T10:00:01Z");
-        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let res = commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
         let ids = root_ids(&root, &res.new_version.unwrap());
         assert_eq!(
             ids,
@@ -2055,21 +2055,21 @@ roots {
         );
         let old = store_md(&root, b"old", "old", "2026-04-05T10:00:00Z"); // 14d old
         write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-05T10:00:01Z");
-        // First compact — produces a root with the entry. Then pin it.
-        compact_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        // First commit — produces a root with the entry. Then pin it.
+        commit_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
         overwrite_root_with_pin(&root, "rfcs", &old.id, &old.hash, "2026-04-11T10:00:01Z");
-        // Second compact with a much later `now` — the 14-day-old entry
+        // Second commit with a much later `now` — the 14-day-old entry
         // would normally drop, but pin should exempt it.
-        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let res = commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
         let version = res.new_version.unwrap_or_else(|| res.prior_version.clone().unwrap());
         let ids = root_ids(&root, &version);
         assert_eq!(ids, vec![old.id], "pinned old entry must survive");
     }
 
-    // -- Hot-ledger prune: MaxAge ----------------------------------------
+    // -- Staged-ledger prune: MaxAge ----------------------------------------
 
     #[test]
-    fn max_age_hot_ledger_prunes_events_older_than_policy() {
+    fn max_age_staged_ledger_prunes_events_older_than_policy() {
         let (_t, root) = setup();
         write_config(
             &root,
@@ -2084,22 +2084,22 @@ roots {
         write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-05T10:00:01Z");
         write_assign_for(&root, &fresh.id, "rfcs", vec![], "2026-04-18T10:00:01Z");
 
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
         // old's store event must have been pruned; fresh's retained.
         assert!(
-            !hot_event_exists(&root, &old),
-            "stale hot event should be gone"
+            !staged_event_exists(&root, &old),
+            "stale staged event should be gone"
         );
         assert!(
-            hot_event_exists(&root, &fresh),
-            "fresh hot event should survive"
+            staged_event_exists(&root, &fresh),
+            "fresh staged event should survive"
         );
     }
 
-    // -- Hot-ledger prune: KeepLastN -------------------------------------
+    // -- Staged-ledger prune: KeepLastN -------------------------------------
 
     #[test]
-    fn keep_last_n_keeps_only_n_most_recent_hot_events_per_kino() {
+    fn keep_last_n_keeps_only_n_most_recent_staged_events_per_kino() {
         let (_t, root) = setup();
         write_config(
             &root,
@@ -2122,20 +2122,20 @@ roots {
             ],
         );
         write_assign_for(&root, &chain[0].id, "rfcs", vec![], "2026-04-05T10:00:01Z");
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
 
         // v3, v4, v5 survive; v1, v2 get pruned.
-        assert!(!hot_event_exists(&root, &chain[0]), "v1 should be pruned");
-        assert!(!hot_event_exists(&root, &chain[1]), "v2 should be pruned");
-        assert!(hot_event_exists(&root, &chain[2]), "v3 should survive");
-        assert!(hot_event_exists(&root, &chain[3]), "v4 should survive");
-        assert!(hot_event_exists(&root, &chain[4]), "v5 should survive");
+        assert!(!staged_event_exists(&root, &chain[0]), "v1 should be pruned");
+        assert!(!staged_event_exists(&root, &chain[1]), "v2 should be pruned");
+        assert!(staged_event_exists(&root, &chain[2]), "v3 should survive");
+        assert!(staged_event_exists(&root, &chain[3]), "v4 should survive");
+        assert!(staged_event_exists(&root, &chain[4]), "v5 should survive");
     }
 
     #[test]
     fn keep_last_n_pin_on_version_1_survives_plus_three_newest() {
         let (_t, root) = setup();
-        // Start with Never so the first compact materializes every version
+        // Start with Never so the first commit materializes every version
         // without pruning anything — the user can then hand-edit the pin.
         write_config(
             &root,
@@ -2157,7 +2157,7 @@ roots {
             ],
         );
         write_assign_for(&root, &chain[0].id, "rfcs", vec![], "2026-04-05T10:00:01Z");
-        compact_root(&root, "rfcs", params("yj", "2026-04-05T11:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-05T11:00:00Z")).unwrap();
         // Pin the root entry to v1 explicitly. This simulates a hand-edit.
         overwrite_root_with_pin(&root, "rfcs", &chain[0].id, &chain[0].hash, "2026-04-05T11:30:00Z");
         // Now switch the policy to keep-last-3 and run again. The pin from
@@ -2170,19 +2170,19 @@ roots {
 }
 "#,
         );
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
         // v1 pinned → survives; v3, v4, v5 are the 3 newest → survive; v2 pruned.
-        assert!(hot_event_exists(&root, &chain[0]), "v1 pinned, must survive");
-        assert!(!hot_event_exists(&root, &chain[1]), "v2 not in top-3, not pinned → pruned");
-        assert!(hot_event_exists(&root, &chain[2]), "v3 in top-3, survives");
-        assert!(hot_event_exists(&root, &chain[3]), "v4 in top-3, survives");
-        assert!(hot_event_exists(&root, &chain[4]), "v5 in top-3, survives");
+        assert!(staged_event_exists(&root, &chain[0]), "v1 pinned, must survive");
+        assert!(!staged_event_exists(&root, &chain[1]), "v2 not in top-3, not pinned → pruned");
+        assert!(staged_event_exists(&root, &chain[2]), "v3 in top-3, survives");
+        assert!(staged_event_exists(&root, &chain[3]), "v4 in top-3, survives");
+        assert!(staged_event_exists(&root, &chain[4]), "v5 in top-3, survives");
     }
 
-    // -- Hot-ledger prune baseline: fresh events untouched ----------------
+    // -- Staged-ledger prune baseline: fresh events untouched ----------------
 
     #[test]
-    fn fresh_hot_events_untouched_by_policy() {
+    fn fresh_staged_events_untouched_by_policy() {
         let (_t, root) = setup();
         write_config(
             &root,
@@ -2197,16 +2197,16 @@ roots {
         let b = store_md(&root, b"b", "b", "2026-04-19T09:00:00Z");
         write_assign_for(&root, &a.id, "rfcs", vec![], "2026-04-18T10:00:01Z");
         write_assign_for(&root, &b.id, "rfcs", vec![], "2026-04-19T09:00:01Z");
-        let count_before = hot_event_count(&root);
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
-        let count_after = hot_event_count(&root);
-        // Compact adds a root event (+1) but must not drop the two user + two assign events.
+        let count_before = staged_event_count(&root);
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let count_after = staged_event_count(&root);
+        // Commit adds a root event (+1) but must not drop the two user + two assign events.
         assert!(
             count_after >= count_before,
             "fresh events must survive: before={count_before}, after={count_after}"
         );
-        assert!(hot_event_exists(&root, &a));
-        assert!(hot_event_exists(&root, &b));
+        assert!(staged_event_exists(&root, &a));
+        assert!(staged_event_exists(&root, &b));
     }
 
     // -- Ownership wins over pin on cross-root reassign -----------------
@@ -2225,7 +2225,7 @@ roots {
         );
         let k = store_md(&root, b"v", "v", "2024-04-19T10:00:00Z");
         let first = write_assign_for(&root, &k.id, "rfcs", vec![], "2024-04-19T10:00:01Z");
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
         overwrite_root_with_pin(&root, "rfcs", &k.id, &k.hash, "2026-04-19T10:00:01Z");
         // Reassign to designs — this supersedes the rfcs assign.
         write_assign_for(
@@ -2235,11 +2235,11 @@ roots {
             vec![first.as_hex().to_owned()],
             "2026-04-19T11:00:00Z",
         );
-        // Both roots run a compact. The pin on rfcs must not survive the
+        // Both roots run a commit. The pin on rfcs must not survive the
         // move — routing now puts the kino in designs, so rfcs' rebuild
         // has no entry for it at all.
-        let rfcs = compact_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
-        let designs = compact_root(&root, "designs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let rfcs = commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let designs = commit_root(&root, "designs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let rfcs_ids = root_ids(&root, &rfcs.new_version.unwrap());
         let designs_ids = root_ids(
             &root,
@@ -2264,8 +2264,8 @@ roots {
         );
         // Old store + old assign, both 14 days stale; fresh store + fresh
         // assign both under 1 day. The old assign still needs to be on
-        // disk at compact time (else the old kino wouldn't route to rfcs),
-        // so we age both stores into the past but run compact at `now`.
+        // disk at commit time (else the old kino wouldn't route to rfcs),
+        // so we age both stores into the past but run commit at `now`.
         let old = store_md(&root, b"old", "old", "2026-04-05T10:00:00Z");
         let fresh = store_md(&root, b"fresh", "fresh", "2026-04-18T10:00:00Z");
         let old_assign_hash =
@@ -2273,7 +2273,7 @@ roots {
         let fresh_assign_hash =
             write_assign_for(&root, &fresh.id, "rfcs", vec![], "2026-04-18T10:00:01Z");
 
-        // Find the full assign events so we can ask hot_event_exists about
+        // Find the full assign events so we can ask staged_event_exists about
         // their JSON-line hashes (mirrors what the prune path keys on).
         let events = Ledger::new(&root).read_all_events().unwrap();
         let old_assign = events
@@ -2287,14 +2287,14 @@ roots {
             .expect("fresh assign present")
             .clone();
 
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
 
         assert!(
-            !hot_event_exists(&root, &old_assign),
+            !staged_event_exists(&root, &old_assign),
             "stale assign event must be pruned"
         );
         assert!(
-            hot_event_exists(&root, &fresh_assign),
+            staged_event_exists(&root, &fresh_assign),
             "fresh assign event must survive"
         );
     }
@@ -2358,12 +2358,12 @@ roots {
         let kg = store_kinograph(&root, vec![kg_entry], "my-list", "2026-04-10T10:00:00Z");
         write_assign_for(&root, &kg.id, "rfcs", vec![], "2026-04-10T10:00:01Z");
 
-        // Compact both roots. B's 30d policy would drop X, but rfcs' kg
+        // Commit both roots. B's 30d policy would drop X, but rfcs' kg
         // references it → integrity holds X.
         let rfcs_res =
-            compact_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let b_res =
-            compact_root(&root, "inbox-b", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+            commit_root(&root, "inbox-b", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let rfcs_ids = root_ids(&root, &rfcs_res.new_version.unwrap());
         let b_ids = root_ids(&root, &b_res.new_version.unwrap());
         assert_eq!(rfcs_ids, vec![kg.id], "rfcs keeps its kinograph");
@@ -2372,10 +2372,10 @@ roots {
             vec![x.id.clone()],
             "inbox-b must NOT drop X — rfcs composes it"
         );
-        // X's store event must also survive the hot prune.
+        // X's store event must also survive the staged prune.
         assert!(
-            hot_event_exists(&root, &x),
-            "X's hot event must be protected by the external ref"
+            staged_event_exists(&root, &x),
+            "X's staged event must be protected by the external ref"
         );
     }
 
@@ -2409,8 +2409,8 @@ roots {
             "2026-04-10T10:00:00Z",
         );
         write_assign_for(&root, &kg_v1.id, "rfcs", vec![], "2026-04-10T10:00:01Z");
-        compact_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
-        compact_root(&root, "inbox-b", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        commit_root(&root, "inbox-b", params("yj", "2026-04-11T10:00:00Z")).unwrap();
 
         // v2 of the kinograph replaces X with Y.
         let kg_v2_k = Kinograph {
@@ -2437,11 +2437,11 @@ roots {
         .unwrap();
         let _kg_v2 = stored.event;
 
-        // Compact both roots again. rfcs now refs Y, not X. X is ONLY
+        // Commit both roots again. rfcs now refs Y, not X. X is ONLY
         // owned by inbox-b, 40d old, no cross-root protection → drop.
-        compact_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let b_res =
-            compact_root(&root, "inbox-b", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+            commit_root(&root, "inbox-b", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let b_ids = root_ids(&root, &b_res.new_version.unwrap());
         assert!(
             !b_ids.contains(&x.id),
@@ -2514,18 +2514,18 @@ roots {
         )
         .unwrap();
 
-        // Both compacts must terminate cleanly.
-        let a_res = compact_root(&root, "ra", params("yj", "2026-04-19T12:00:00Z")).unwrap();
-        let b_res = compact_root(&root, "rb", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        // Both commits must terminate cleanly.
+        let a_res = commit_root(&root, "ra", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let b_res = commit_root(&root, "rb", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         assert!(a_res.new_version.is_some());
         assert!(b_res.new_version.is_some());
     }
 
     #[test]
-    fn compact_all_snapshot_taken_at_batch_start_protects_across_roots() {
-        // Verifies that compact_all computes its ExternalRefs snapshot
-        // once and passes it to every per-root compact — even the root
-        // whose own compaction bumps another root's pointer.
+    fn commit_all_snapshot_taken_at_batch_start_protects_across_roots() {
+        // Verifies that commit_all computes its ExternalRefs snapshot
+        // once and passes it to every per-root commit — even the root
+        // whose own commit bumps another root's pointer.
         let (_t, root) = setup();
         write_config(
             &root,
@@ -2551,18 +2551,18 @@ roots {
         );
         write_assign_for(&root, &kg.id, "rfcs", vec![], "2026-04-10T10:00:01Z");
 
-        // Pre-compact rfcs once so its root pointer names the kg
+        // Pre-commit rfcs once so its root pointer names the kg
         // kinograph; otherwise the batch snapshot wouldn't yet see the
         // reference.
-        compact_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        commit_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
 
-        let entries = compact_all(&root, params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let entries = commit_all(&root, params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let by_name: std::collections::HashMap<_, _> = entries.into_iter().collect();
         let b_res = by_name["inbox-b"].as_ref().unwrap();
         let b_ids = root_ids(&root, &b_res.new_version.as_ref().unwrap().clone());
         assert!(
             b_ids.contains(&x.id),
-            "compact_all must propagate cross-root protection: {b_ids:?}"
+            "commit_all must propagate cross-root protection: {b_ids:?}"
         );
         assert_eq!(
             b_res.retained_by_cross_root.get("rfcs").copied(),
@@ -2618,10 +2618,10 @@ roots {
         );
         write_assign_for(&root, &kg_b.id, "rb", vec![], "2026-04-10T10:00:03Z");
 
-        compact_root(&root, "ra", params("yj", "2026-04-11T10:00:00Z")).unwrap();
-        compact_root(&root, "rb", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        commit_root(&root, "ra", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        commit_root(&root, "rb", params("yj", "2026-04-11T10:00:00Z")).unwrap();
         let c_res =
-            compact_root(&root, "rc", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+            commit_root(&root, "rc", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         assert_eq!(c_res.retained_by_cross_root.get("ra").copied(), Some(1));
         assert_eq!(c_res.retained_by_cross_root.get("rb").copied(), Some(1));
     }

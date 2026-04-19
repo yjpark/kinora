@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use kinora::assign::AssignError;
-use kinora::compact::CompactError;
+use kinora::commit::CommitError;
 use kinora::config::ConfigError;
 use kinora::kino::StoreKinoError;
 use kinora::kinograph::KinographError;
@@ -42,7 +42,7 @@ pub enum CliError {
     #[error(transparent)]
     Ledger(#[from] LedgerError),
     #[error(transparent)]
-    Compact(#[from] CompactError),
+    Commit(#[from] CommitError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]

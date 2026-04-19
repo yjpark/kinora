@@ -20,7 +20,7 @@ pub struct AssignRunArgs {
 }
 
 /// Outcome of `kinora assign` — the written assign event's hash and
-/// whether a new hot file was introduced (false on idempotent re-assign).
+/// whether a new staged file was introduced (false on idempotent re-assign).
 #[derive(Debug)]
 pub struct AssignRunResult {
     pub kino_id: String,

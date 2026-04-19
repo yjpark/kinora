@@ -7,7 +7,7 @@ use kinora::assign::{write_assign, AssignEvent};
 use kinora::author::resolve_author_from_git;
 use kinora::kino::{store_kino, StoreKinoParams, StoredKino};
 use kinora::kinograph::Kinograph;
-use kinora::paths::{hot_event_path, kinora_root};
+use kinora::paths::{staged_event_path, kinora_root};
 use kinora::resolve::Resolver;
 
 use crate::common::{find_repo_root, parse_metadata_flag, parse_parents, CliError};
@@ -96,7 +96,7 @@ pub fn run_store(cwd: &Path, args: StoreRunArgs) -> Result<StoredKino, CliError>
 }
 
 /// Write `assign` as the second half of a `kinora store --root` pair.
-/// On failure, best-effort deletes the store event's hot file iff this
+/// On failure, best-effort deletes the store event's staged file iff this
 /// call introduced it (stored.was_new_lineage), preserving the atomic-pair
 /// invariant at the event layer: after rollback there's no orphan store
 /// event claiming a root that never received a matching assign.
@@ -117,7 +117,7 @@ fn pair_assign_with_rollback(
             if stored.was_new_lineage
                 && let Ok(h) = stored.event.event_hash()
             {
-                let _ = fs::remove_file(hot_event_path(kin_root, &h));
+                let _ = fs::remove_file(staged_event_path(kin_root, &h));
             }
             Err(assign_err.into())
         }
@@ -125,7 +125,7 @@ fn pair_assign_with_rollback(
 }
 
 /// Format the one-line human summary printed after a successful `kinora
-/// store`. Under the hot-ledger layout each event lives in its own file
+/// store`. Under the staged-ledger layout each event lives in its own file
 /// keyed by the event hash, so `event=<shorthash>` is the precise wording;
 /// the prior "lineage" terminology is a carryover from the per-lineage
 /// ledger layout and has been retired from the UI. The `StoredKino.lineage`
@@ -505,11 +505,11 @@ mod tests {
     #[test]
     fn store_with_root_rolls_back_store_event_on_assign_failure() {
         // Injects a failure at the second write of the atomic pair by
-        // pre-placing a directory at the expected assign event hot-file
+        // pre-placing a directory at the expected assign event staged-file
         // path, which makes `fs::rename(tmp, target)` fail — exactly the
         // failure mode we must roll back from.
         use kinora::assign::AssignEvent;
-        use kinora::paths::hot_event_path;
+        use kinora::paths::staged_event_path;
 
         let tmp = repo();
         let kin_root = kinora_root(tmp.path());
@@ -545,7 +545,7 @@ mod tests {
             provenance: "unit-test".into(),
         };
         let assign_hash = assign.event_hash().unwrap();
-        let assign_path = hot_event_path(&kin_root, &assign_hash);
+        let assign_path = staged_event_path(&kin_root, &assign_hash);
         fs::create_dir_all(&assign_path).unwrap();
         // Non-empty dir blocks fs::rename more reliably across platforms.
         fs::write(assign_path.join("blocker"), b"x").unwrap();
@@ -553,12 +553,12 @@ mod tests {
         let err = pair_assign_with_rollback(&kin_root, &stored, &assign).unwrap_err();
         assert!(matches!(err, CliError::Assign(_)), "got {err:?}");
 
-        // Rollback: store event hot file must be gone.
+        // Rollback: store event staged file must be gone.
         let store_event_hash = stored.event.event_hash().unwrap();
-        let store_event_path = hot_event_path(&kin_root, &store_event_hash);
+        let store_event_path = staged_event_path(&kin_root, &store_event_hash);
         assert!(
             !store_event_path.exists(),
-            "store event hot file should have been rolled back: {}",
+            "store event staged file should have been rolled back: {}",
             store_event_path.display()
         );
     }

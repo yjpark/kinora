@@ -84,7 +84,7 @@ pub struct Resolver {
 
 impl Resolver {
     /// Load all identities from every event recorded under `.kinora/`.
-    /// Reads both the new hot layout (`hot/<ab>/<event-hash>.jsonl`) and the
+    /// Reads both the new staged layout (`staged/<ab>/<event-hash>.jsonl`) and the
     /// legacy per-lineage layout (`ledger/<lineage>.jsonl`) and unions them,
     /// deduping by event hash. Events are grouped by `id`; heads precomputed.
     #[fastrace::trace]
@@ -114,7 +114,7 @@ impl Resolver {
             }
         }
 
-        // Hot layout: one file per event. Per-event lineage label = event
+        // Staged layout: one file per event. Per-event lineage label = event
         // hash shorthash.
         for event in ledger.read_all_events()? {
             if !event.is_store_event() {
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn branch_aware_tiebreak_still_works_for_legacy_lineage_files() {
-        // Under the hot-ledger layout, per-event files don't participate in
+        // Under the staged-ledger layout, per-event files don't participate in
         // HEAD-based tiebreak (all events live in their own file, so none
         // shares a lineage with HEAD). The tiebreaker is retained only for
         // legacy `.kinora/ledger/<lineage>.jsonl` files so previously-written
@@ -496,8 +496,8 @@ mod tests {
     }
 
     #[test]
-    fn resolver_groups_events_across_hot_and_legacy_stores() {
-        // Two independent identities — one new (via store_kino → hot), one
+    fn resolver_groups_events_across_staged_and_legacy_stores() {
+        // Two independent identities — one new (via store_kino → staged), one
         // legacy (hand-written into `ledger/`). Resolver::load must surface
         // both.
         let (_t, root) = setup();
@@ -526,9 +526,9 @@ mod tests {
     }
 
     #[test]
-    fn resolver_dedups_when_same_event_lives_in_both_hot_and_legacy() {
+    fn resolver_dedups_when_same_event_lives_in_both_staged_and_legacy() {
         // During the transition, the same logical event may appear in both
-        // layouts — e.g. a legacy lineage file still on disk alongside a hot
+        // layouts — e.g. a legacy lineage file still on disk alongside a staged
         // event file. Resolver must dedup by event hash so heads/parents don't
         // double-count.
         let (_t, root) = setup();
@@ -551,7 +551,7 @@ mod tests {
 
         ledger.mint_and_append(&event).unwrap();
         let (_, was_new) = ledger.write_event(&event).unwrap();
-        assert!(was_new, "hot write should have created a new file");
+        assert!(was_new, "staged write should have created a new file");
 
         let resolver = Resolver::load(&root).unwrap();
         let identity = resolver.identities().get(&event.id).expect("identity present");
@@ -560,8 +560,8 @@ mod tests {
     }
 
     #[test]
-    fn fork_from_hot_events_produces_multiple_heads() {
-        // Under the hot-ledger layout, HEAD-based tiebreak no longer applies
+    fn fork_from_staged_events_produces_multiple_heads() {
+        // Under the staged-ledger layout, HEAD-based tiebreak no longer applies
         // to new events (each lives in its own file). Forks therefore always
         // surface as `MultipleHeads`, which callers must resolve explicitly.
         let (_t, root) = setup();
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn resolver_ignores_non_store_events() {
         // Hand-forge a non-store (e.g. assign-track) event and write it to
-        // the hot ledger. Resolver::load must skip it so the identity it
+        // the staged ledger. Resolver::load must skip it so the identity it
         // carries doesn't pollute the content graph.
         let (_t, root) = setup();
         let ledger = Ledger::new(&root);

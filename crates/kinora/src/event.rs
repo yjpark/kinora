@@ -17,7 +17,7 @@ pub const EVENT_KIND_ASSIGN: &str = "assign";
 /// `event_kind` is the top-level discriminator introduced in phase 3 — it
 /// distinguishes content-store events from non-store events (e.g. `assign`,
 /// metadata resolutions). Consumers that operate on content (resolver,
-/// render, compact) filter on `is_store_event()` so non-store events slide
+/// render, commit) filter on `is_store_event()` so non-store events slide
 /// past harmlessly until their dedicated handler lands.
 ///
 /// Fields stored as String for facet-json round-trip simplicity in MVP.
@@ -39,7 +39,7 @@ pub struct Event {
 }
 
 /// Pre-phase-3 on-disk event shape, for backward-compat parsing of
-/// legacy hot files that were written before the `event_kind`
+/// legacy staged files that were written before the `event_kind`
 /// discriminator landed. Promoted to `Event` with `event_kind = "store"`.
 #[derive(Facet, Debug, Clone, PartialEq)]
 struct LegacyEvent {
@@ -105,7 +105,7 @@ impl Event {
     }
 
     /// True iff this event belongs to the content-store track (the only
-    /// event kind consumers like resolver/render/compact should follow).
+    /// event kind consumers like resolver/render/commit should follow).
     pub fn is_store_event(&self) -> bool {
         self.event_kind == EVENT_KIND_STORE
     }
@@ -161,7 +161,7 @@ impl Event {
     /// preserves order, and facet-json writes struct fields in declaration
     /// order — so the same logical event always produces the same hash,
     /// enabling dedup across branches and immutable one-file-per-event
-    /// storage in `.kinora/hot/`.
+    /// storage in `.kinora/staged/`.
     pub fn event_hash(&self) -> Result<Hash, EventError> {
         let line = self.to_json_line()?;
         Ok(Hash::of_content(line.as_bytes()))

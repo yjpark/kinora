@@ -281,7 +281,7 @@ mod tests {
             store_kino(&root, p).unwrap();
         }
 
-        // HEAD is no longer written by the hot ledger, but older workspaces
+        // HEAD is no longer written by the staged ledger, but older workspaces
         // may still have it — remove best-effort so the legacy tiebreak
         // cannot accidentally resolve the fork.
         let _ = std::fs::remove_file(kinora::paths::head_path(&root));
