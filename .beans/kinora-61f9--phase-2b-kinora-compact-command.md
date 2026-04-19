@@ -1,11 +1,11 @@
 ---
 # kinora-61f9
 title: 'Phase 2B: `kinora compact` command'
-status: todo
+status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T06:50:57Z
-updated_at: 2026-04-19T06:51:01Z
+updated_at: 2026-04-19T07:09:25Z
 parent: kinora-xi21
 blocked_by:
     - kinora-h4xs
@@ -67,14 +67,14 @@ Phase 2 ships single-flat-root. Default `--root main` when not specified. Phase 
 
 ## Acceptance
 
-- [ ] `compact()` library fn: genesis case (no prior root) produces a root with `parents[]` empty
-- [ ] Subsequent compaction: `parents = [prior_version]`, new `version` hash differs
-- [ ] Idempotence: `compact` with no new events is a no-op (`new_version = None`), pointer file unchanged
-- [ ] Two independent compactions over the same hot-event set produce byte-identical root blobs (cross-dev determinism test)
-- [ ] Entry order is sorted by id — parse output and assert
-- [ ] Pointer file `.kinora/roots/<name>` contains the 64-hex version hash only (no trailing whitespace/newline, or explicit trailing newline — pick one and test it)
+- [x] `compact()` library fn: genesis case (no prior root) produces a root with `parents[]` empty
+- [x] Subsequent compaction: `parents = [prior_version]`, new `version` hash differs
+- [x] Idempotence: `compact` with no new events is a no-op (`new_version = None`), pointer file unchanged
+- [x] Two independent compactions over the same hot-event set produce byte-identical root blobs (cross-dev determinism test)
+- [x] Entry order is sorted by id — parse output and assert
+- [x] Pointer file `.kinora/roots/<name>` contains the 64-hex version hash only (no trailing whitespace/newline, or explicit trailing newline — pick one and test it)
 - [ ] CLI `kinora compact` prints expected output, exits 0
-- [ ] Integration test: store 3 markdown kinos → compact → assert root has 3 entries → store a v2 → compact again → assert root has 3 entries with one bumped version
+- [x] Integration test: store 3 markdown kinos → compact → assert root has 3 entries → store a v2 → compact again → assert root has 3 entries with one bumped version
 - [ ] Zero compiler warnings
 
 ## Out of scope

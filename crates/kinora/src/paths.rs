@@ -10,6 +10,7 @@ pub const LEDGER_DIR: &str = "ledger";
 pub const LEDGER_EXT: &str = "jsonl";
 pub const HOT_DIR: &str = "hot";
 pub const HOT_EXT: &str = "jsonl";
+pub const ROOTS_DIR: &str = "roots";
 
 pub fn kinora_root(repo_root: &Path) -> PathBuf {
     repo_root.join(KINORA_DIR)
@@ -96,6 +97,19 @@ pub fn hot_event_path(kinora_root: &Path, event_hash: &Hash) -> PathBuf {
     hot_dir(kinora_root)
         .join(event_hash.shard())
         .join(format!("{}.{HOT_EXT}", event_hash.as_hex()))
+}
+
+/// Directory housing root-kinograph pointer files. Each file in this directory
+/// is named after a root (e.g. `main`) and its body is the 64-hex content hash
+/// of the root kinograph's latest version.
+pub fn roots_dir(kinora_root: &Path) -> PathBuf {
+    kinora_root.join(ROOTS_DIR)
+}
+
+/// Pointer file for a named root kinograph. Body is the 64-hex content hash
+/// of the current version (no trailing newline).
+pub fn root_pointer_path(kinora_root: &Path, name: &str) -> PathBuf {
+    roots_dir(kinora_root).join(name)
 }
 
 #[cfg(test)]
@@ -246,6 +260,21 @@ mod tests {
             PathBuf::from(
                 "/repo/.kinora/hot/af/af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262.jsonl"
             )
+        );
+    }
+
+    #[test]
+    fn roots_dir_is_kinora_subdir() {
+        let kin = kinora_root(&root());
+        assert_eq!(roots_dir(&kin), PathBuf::from("/repo/.kinora/roots"));
+    }
+
+    #[test]
+    fn root_pointer_path_joins_name() {
+        let kin = kinora_root(&root());
+        assert_eq!(
+            root_pointer_path(&kin, "main"),
+            PathBuf::from("/repo/.kinora/roots/main")
         );
     }
 }
