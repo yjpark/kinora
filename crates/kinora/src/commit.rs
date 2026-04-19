@@ -1045,8 +1045,19 @@ pub fn commit_all(
     // against — conservative and deterministic.
     let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
 
-    let mut out: Vec<CommitAllEntry> = Vec::with_capacity(config.roots.len());
-    for name in config.roots.keys() {
+    // Iterate non-commits roots first (in name order), then `commits`
+    // last. The commits root's job is to consume the archive-assigns each
+    // other root produces during this batch — so it must run after every
+    // sibling has had a chance to stage its archive.
+    let ordered: Vec<&String> = config
+        .roots
+        .keys()
+        .filter(|n| n.as_str() != "commits")
+        .chain(config.roots.keys().filter(|n| n.as_str() == "commits"))
+        .collect();
+
+    let mut out: Vec<CommitAllEntry> = Vec::with_capacity(ordered.len());
+    for name in ordered {
         let result = commit_root_with_refs(
             kinora_root,
             name,
@@ -1480,12 +1491,38 @@ roots {
 
         let entries = commit_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
         let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
-        // `inbox` and `commits` are auto-provisioned by Config::from_styx
-        // when absent.
-        assert_eq!(names, vec!["alpha", "commits", "inbox", "main", "zeta"]);
+        // Non-commits roots run in name order (auto-provisioned `inbox`
+        // included), then `commits` iterates last so it can consume the
+        // archive-assigns the other roots just produced.
+        assert_eq!(names, vec!["alpha", "inbox", "main", "zeta", "commits"]);
         assert!(
             entries.iter().all(|(_, r)| r.is_ok()),
             "every root should have committed cleanly: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn commit_all_iterates_commits_root_last() {
+        // `commits` must run after all other roots regardless of its
+        // alphabetical position, so it can consume the archive-assigns the
+        // other roots produce during their commits.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  zulu { policy "never" }
+  alpha { policy "never" }
+}
+"#,
+        );
+
+        let entries = commit_all(&root, params("yj", "2026-04-19T10:00:01Z")).unwrap();
+        let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(
+            names.last().map(|s| s.as_str()),
+            Some("commits"),
+            "commits must run last; got: {names:?}",
         );
     }
 
@@ -1568,7 +1605,8 @@ roots {
         let entries = commit_all(&root, params("yj", "2026-04-19T10:00:00Z")).unwrap();
         assert_eq!(entries.len(), 2);
         let names: Vec<_> = entries.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names, vec!["commits", "inbox"]);
+        // `commits` always runs last so it can sweep up archive-assigns.
+        assert_eq!(names, vec!["inbox", "commits"]);
         for (_name, result) in &entries {
             let res = result.as_ref().unwrap();
             assert!(res.new_version.is_none());

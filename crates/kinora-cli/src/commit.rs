@@ -248,10 +248,10 @@ mod tests {
         assign_to(&kin, &b.id, "rfcs");
 
         let report = run_commit(tmp.path(), args()).unwrap();
-        // `inbox` and `commits` are auto-provisioned in Config::from_styx
-        // when absent.
+        // Non-commits roots run in name order (auto-provisioned `inbox`
+        // included), then `commits` iterates last.
         let names: Vec<_> = report.per_root.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names, vec!["commits", "inbox", "main", "rfcs"]);
+        assert_eq!(names, vec!["inbox", "main", "rfcs", "commits"]);
         assert!(!report.any_error(), "expected all roots to succeed: {names:?}");
         assert!(kinora::paths::root_pointer_path(&kin, "main").is_file());
         assert!(kinora::paths::root_pointer_path(&kin, "rfcs").is_file());
@@ -291,7 +291,8 @@ mod tests {
         assert!(!report.any_error());
         assert_eq!(report.per_root.len(), 2);
         let names: Vec<_> = report.per_root.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names, vec!["commits", "inbox"]);
+        // `commits` always runs last so it can sweep up archive-assigns.
+        assert_eq!(names, vec!["inbox", "commits"]);
         for (_name, result) in &report.per_root {
             let r = result.as_ref().unwrap();
             assert!(r.new_version.is_none(), "no staged events → no new version");
