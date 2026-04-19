@@ -64,6 +64,8 @@ pub enum ReformatError {
     PriorRootEventMissing { name: String, version: String },
     #[error("identity {id} has {} heads at reformat time: {}", .heads.len(), .heads.join(", "))]
     MultipleHeads { id: String, heads: Vec<String> },
+    #[error("identity {id} has no head at reformat time (cycle or orphan)")]
+    NoHead { id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +116,13 @@ pub fn reformat_repo(
 
     let mut report = ReformatReport::default();
 
+    // Hoist the ledger read out of Step 1's per-root loop so we pay the
+    // scan cost once per reformat run. Step 2 reuses the same snapshot; if
+    // Step 1 stages new root events the snapshot won't see them, but
+    // Step 2 only uses the snapshot for kinograph identity lookups, not
+    // root pointer traversal, so the staleness is benign.
+    let events = ledger.read_all_events()?;
+
     // Step 1: reformat root kinographs in name order. Each root's pointer
     // is rewritten to the new blob + a store event recorded, mirroring
     // what `commit_root` does on a regular version bump.
@@ -122,8 +131,13 @@ pub fn reformat_repo(
             continue;
         };
         let content = store.read(&prior_hash)?;
-        let text = std::str::from_utf8(&content).unwrap_or("");
-        if is_styxl(text) {
+        // Only take the styxl fast-path when the blob is valid UTF-8;
+        // otherwise fall through to `RootKinograph::parse`, which surfaces
+        // a proper error instead of silently counting the blob as
+        // already-formatted.
+        if let Ok(text) = std::str::from_utf8(&content)
+            && is_styxl(text)
+        {
             report.skipped_roots_already_formatted += 1;
             continue;
         }
@@ -135,7 +149,6 @@ pub fn reformat_repo(
         }
 
         // Find the prior store event so we can carry its identity forward.
-        let events = ledger.read_all_events()?;
         let prior_event = events
             .iter()
             .find(|e| e.hash == prior_hash.as_hex() && e.is_store_event())
@@ -177,7 +190,6 @@ pub fn reformat_repo(
     // kinograph-kind entry ids, and recurse into their heads' composition
     // entries. Reformat each kinograph kino we hit whose content is still
     // legacy-wrapped.
-    let events = ledger.read_all_events()?;
     let events_by_id = group_store_events_by_id(&events);
 
     let mut to_visit: Vec<String> = Vec::new();
@@ -214,8 +226,11 @@ pub fn reformat_repo(
             }
         })?;
         let content = store.read(&head_hash)?;
-        let text = std::str::from_utf8(&content).unwrap_or("");
-        if is_styxl(text) {
+        // Mirror the UTF-8 guard in Step 1: only fast-path when valid
+        // UTF-8 + styxl-shaped; otherwise fall through to parse.
+        if let Ok(text) = std::str::from_utf8(&content)
+            && is_styxl(text)
+        {
             report.skipped_kinographs_already_formatted += 1;
             continue;
         }
@@ -278,10 +293,7 @@ fn pick_head<'a>(id: &str, events: &'a [Event]) -> Result<&'a Event, ReformatErr
         .collect();
     match heads.as_slice() {
         [only] => Ok(*only),
-        [] => Err(ReformatError::MultipleHeads {
-            id: id.to_owned(),
-            heads: Vec::new(),
-        }),
+        [] => Err(ReformatError::NoHead { id: id.to_owned() }),
         many => Err(ReformatError::MultipleHeads {
             id: id.to_owned(),
             heads: many.iter().map(|e| e.hash.clone()).collect(),
@@ -507,9 +519,14 @@ mod tests {
 
     #[test]
     fn reformat_skips_markdown_and_text_kinos() {
+        // Compose a legacy kinograph that references a markdown + a text
+        // kino, so the graph walk actually visits the root entries. The
+        // kinograph's own bytes get reformatted (covered by other tests);
+        // we're asserting here that no new-version events are emitted for
+        // the two opaque leaf kinos.
         let (_t, root) = setup();
-        store_md(&root, b"hello", "hello", "2026-04-19T10:00:00Z");
-        let stored = store_kino(
+        let md = store_md(&root, b"hello", "hello", "2026-04-19T10:00:00Z");
+        let text_stored = store_kino(
             &root,
             StoreKinoParams {
                 kind: "text".into(),
@@ -523,28 +540,33 @@ mod tests {
             },
         )
         .unwrap();
-        let text_event = stored.event;
-        commit_all(&root, commit_params("2026-04-19T10:00:02Z")).unwrap();
-
-        let events_before = Ledger::new(&root).read_all_events().unwrap();
+        let text_event = text_stored.event;
+        store_legacy_kinograph(
+            &root,
+            &[md.id.clone(), text_event.id.clone()],
+            "list",
+            "2026-04-19T10:00:02Z",
+        );
+        commit_all(&root, commit_params("2026-04-19T10:00:03Z")).unwrap();
 
         let report =
-            reformat_repo(&root, reformat_params("2026-04-19T10:00:03Z")).unwrap();
-        assert!(report.reformatted_kinographs.is_empty());
-        assert_eq!(report.skipped_kinographs_already_formatted, 0);
+            reformat_repo(&root, reformat_params("2026-04-19T10:00:04Z")).unwrap();
+        // The composing kinograph is reformatted; markdown/text are never
+        // visited as kinograph-kind entries, so neither skipped-counter
+        // nor a new-version event should fire for them.
+        assert_eq!(report.reformatted_kinographs.len(), 1);
 
         let events_after = Ledger::new(&root).read_all_events().unwrap();
-        assert_eq!(
-            events_after.len(),
-            events_before.len(),
-            "no new events for markdown/text kinos"
-        );
-        // Text kino's content is unchanged — no new-version event for its id.
+        let versions_for_md: Vec<&Event> = events_after
+            .iter()
+            .filter(|e| e.id == md.id && e.is_store_event())
+            .collect();
+        assert_eq!(versions_for_md.len(), 1, "markdown kino untouched");
         let versions_for_text: Vec<&Event> = events_after
             .iter()
             .filter(|e| e.id == text_event.id && e.is_store_event())
             .collect();
-        assert_eq!(versions_for_text.len(), 1);
+        assert_eq!(versions_for_text.len(), 1, "text kino untouched");
     }
 
     #[test]
