@@ -158,8 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn root_kind_has_styx_extension() {
-        assert_eq!(namespace::ext_for_kind("root"), Some("styx"));
+    fn root_kind_has_styxl_extension() {
+        assert_eq!(namespace::ext_for_kind("root"), Some("styxl"));
     }
 
     #[test]
@@ -366,5 +366,127 @@ mod tests {
         let mut e2 = sample_entry(1);
         e2.note = "hi".into();
         assert_eq!(e2.note_opt(), Some("hi"));
+    }
+
+    // ------------------------------------------------------------------
+    // tx3e: styxl (one-entry-per-line) format for root kinographs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn to_styxl_emits_one_line_per_entry() {
+        let r = RootKinograph {
+            entries: vec![sample_entry(1), sample_entry(2), sample_entry(3)],
+        };
+        let s = r.to_styxl().unwrap();
+        let lines: Vec<_> = s.lines().collect();
+        assert_eq!(lines.len(), 3, "got: {s:?}");
+        for line in &lines {
+            assert!(line.starts_with('{'), "line did not start with '{{': {line:?}");
+            assert!(line.ends_with('}'), "line did not end with '}}': {line:?}");
+        }
+    }
+
+    #[test]
+    fn styxl_roundtrip_preserves_entries() {
+        let mut e = sample_entry(1);
+        e.note = "origin".into();
+        e.pin = true;
+        let r = RootKinograph {
+            entries: vec![e, sample_entry(2)],
+        };
+        let s = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_styxl(&s).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn styxl_sorts_entries_by_id_canonically() {
+        // `to_styxl` emits the canonical sort order (by id) just like the
+        // existing `to_styx`. Guards against byte drift across machines.
+        let r = RootKinograph {
+            entries: vec![sample_entry(3), sample_entry(1), sample_entry(2)],
+        };
+        let s = r.to_styxl().unwrap();
+        let first_ids: Vec<_> = s
+            .lines()
+            .map(|l| {
+                // extract the id hex right after `{id `
+                let rest = l.strip_prefix("{id ").expect("line starts with {id ");
+                rest.split(|c: char| c == ',' || c == '}').next().unwrap().trim().to_owned()
+            })
+            .collect();
+        assert_eq!(first_ids, vec![id(1), id(2), id(3)]);
+    }
+
+    #[test]
+    fn styxl_empty_root_serializes_to_empty_string() {
+        let r = RootKinograph { entries: vec![] };
+        let s = r.to_styxl().unwrap();
+        assert!(s.is_empty(), "empty root should produce empty styxl: {s:?}");
+        let back = RootKinograph::parse_styxl("").unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn styxl_rejects_duplicate_ids_on_parse() {
+        let r = RootKinograph {
+            entries: vec![sample_entry(1), sample_entry(1)],
+        };
+        // Bypass `to_styxl`'s canonicalization by hand-crafting the
+        // duplicate; writer wouldn't normally emit duplicates but the
+        // parser still must reject them as a safety net.
+        let line = {
+            let single = RootKinograph {
+                entries: vec![sample_entry(1)],
+            };
+            single.to_styxl().unwrap().trim_end().to_owned()
+        };
+        let malformed = format!("{line}\n{line}\n");
+        let err = RootKinograph::parse_styxl(&malformed).unwrap_err();
+        assert!(matches!(err, RootError::DuplicateId { .. }), "got: {err:?}");
+        let _ = r;
+    }
+
+    #[test]
+    fn styxl_reports_line_number_on_parse_error() {
+        let good = RootKinograph {
+            entries: vec![sample_entry(1)],
+        }
+        .to_styxl()
+        .unwrap();
+        let input = format!("{good}{{garbage}}\n");
+        let err = RootKinograph::parse_styxl(&input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("line 2"), "error should cite line 2, got: {msg}");
+    }
+
+    #[test]
+    fn parse_accepts_legacy_styx_wrapped_form() {
+        // Old `entries (...)` form must still load so repos holding
+        // pre-reformat root blobs remain readable.
+        let r = RootKinograph {
+            entries: vec![sample_entry(1)],
+        };
+        let legacy = facet_styx::to_string(&r).unwrap();
+        let back = RootKinograph::parse_str(&legacy).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn parse_auto_detects_styxl_form() {
+        let r = RootKinograph {
+            entries: vec![sample_entry(1)],
+        };
+        let styxl = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_str(&styxl).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn root_kind_maps_to_styxl_extension() {
+        // Extension follows the wire format; switching to styxl implies
+        // the store filename is `<hash>.styxl`.
+        assert_eq!(namespace::ext_for_kind("root"), Some("styxl"));
+        assert_eq!(namespace::ext_for_kind("kinograph"), Some("styxl"));
     }
 }

@@ -1,11 +1,11 @@
 ---
 # kinora-tx3e
 title: 'Styx formatting: multiline writer + kinora reformat command'
-status: todo
+status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T15:12:02Z
-updated_at: 2026-04-19T16:58:19Z
+updated_at: 2026-04-19T18:43:26Z
 blocked_by:
     - kinora-jezf
 ---

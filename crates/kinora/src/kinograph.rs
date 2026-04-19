@@ -465,6 +465,133 @@ mod tests {
         assert!(rendered.is_empty());
     }
 
+    // ------------------------------------------------------------------
+    // tx3e: styxl (one-entry-per-line) format
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn to_styxl_emits_one_line_per_entry() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let k = Kinograph {
+            entries: vec![Entry::with_id(&a), Entry::with_id(&b)],
+        };
+        let s = k.to_styxl().unwrap();
+        let lines: Vec<_> = s.lines().collect();
+        assert_eq!(lines.len(), 2, "got: {s:?}");
+        for line in &lines {
+            assert!(line.starts_with('{'), "line did not start with '{{': {line:?}");
+            assert!(line.ends_with('}'), "line did not end with '}}': {line:?}");
+        }
+    }
+
+    #[test]
+    fn styxl_roundtrip_preserves_entries() {
+        let id = "a".repeat(64);
+        let pin = "b".repeat(64);
+        let k = Kinograph {
+            entries: vec![
+                Entry {
+                    id: id.clone(),
+                    name: "doc".into(),
+                    pin: String::new(),
+                    note: String::new(),
+                },
+                Entry {
+                    id: id.clone(),
+                    name: String::new(),
+                    pin: pin.clone(),
+                    note: "see v1".into(),
+                },
+            ],
+        };
+        let s = k.to_styxl().unwrap();
+        let parsed = Kinograph::parse_styxl(&s).unwrap();
+        assert_eq!(parsed, k);
+    }
+
+    #[test]
+    fn styxl_output_ends_with_trailing_newline() {
+        let k = Kinograph {
+            entries: vec![Entry::with_id("a".repeat(64))],
+        };
+        let s = k.to_styxl().unwrap();
+        assert!(s.ends_with('\n'), "styxl output should end with LF: {s:?}");
+    }
+
+    #[test]
+    fn styxl_empty_kinograph_serializes_to_empty_string() {
+        let k = Kinograph { entries: vec![] };
+        let s = k.to_styxl().unwrap();
+        assert!(s.is_empty(), "empty kinograph should produce empty styxl: {s:?}");
+        let back = Kinograph::parse_styxl("").unwrap();
+        assert_eq!(back, k);
+    }
+
+    #[test]
+    fn styxl_tolerates_blank_and_trailing_lines() {
+        let id = "a".repeat(64);
+        let input = format!("{{id {id}}}\n\n{{id {id}}}\n");
+        let k = Kinograph::parse_styxl(&input).unwrap();
+        assert_eq!(k.entries.len(), 2);
+    }
+
+    #[test]
+    fn styxl_reports_line_number_on_parse_error() {
+        let id = "a".repeat(64);
+        let input = format!("{{id {id}}}\n{{not valid}}\n");
+        let err = Kinograph::parse_styxl(&input).unwrap_err();
+        // Expect the error to reference line 2 so callers can point at it.
+        let msg = err.to_string();
+        assert!(msg.contains("line 2"), "error should cite line 2, got: {msg}");
+    }
+
+    #[test]
+    fn styxl_notes_with_reserved_chars_roundtrip() {
+        let id = "a".repeat(64);
+        for note in [
+            "see {here}",
+            "\"quoted\"",
+            "line one\\nline two", // escape literal \n to avoid newlines in payload
+            "commas, yes, commas",
+        ] {
+            let k = Kinograph {
+                entries: vec![Entry {
+                    id: id.clone(),
+                    name: String::new(),
+                    pin: String::new(),
+                    note: note.to_string(),
+                }],
+            };
+            let s = k.to_styxl().unwrap();
+            let parsed = Kinograph::parse_styxl(&s).expect(note);
+            assert_eq!(parsed, k, "roundtrip broke for note={note:?}");
+        }
+    }
+
+    #[test]
+    fn parse_accepts_legacy_styx_wrapped_form() {
+        // `parse` should still accept the old `entries (...)` shape so
+        // repos holding pre-reformat blobs remain readable.
+        let id = "a".repeat(64);
+        let legacy = format!("entries ({{id {id}}})");
+        let k = Kinograph::parse_str(&legacy).unwrap();
+        assert_eq!(k.entries.len(), 1);
+        assert_eq!(k.entries[0].id, id);
+    }
+
+    #[test]
+    fn parse_auto_detects_styxl_form() {
+        // New writer produces styxl; `parse` should accept it without
+        // callers needing to pick between `parse_str` and `parse_styxl`.
+        let k = Kinograph {
+            entries: vec![Entry::with_id("a".repeat(64))],
+        };
+        let styxl = k.to_styxl().unwrap();
+        let back = Kinograph::parse_str(&styxl).unwrap();
+        assert_eq!(back, k);
+    }
+
     #[test]
     fn render_errors_when_pin_does_not_match_any_version() {
         let (_t, root) = repo();
