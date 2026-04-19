@@ -1341,4 +1341,320 @@ roots {
         assert!(timestamps.contains("2026-04-19T10:00:02Z"));
     }
 
+    // ------------------------------------------------------------------
+    // mngq: GC / prune / pin (per-policy)
+    // ------------------------------------------------------------------
+
+    use crate::paths::{hot_dir, hot_event_path};
+
+    /// Replace the prior root pointer with a new root kinograph that pins
+    /// the entry for `kino_id` to the given `version` hash. Writes the new
+    /// blob to the content store, authors a root store event linked to the
+    /// prior version via `parents`, and points `.kinora/roots/<name>` at
+    /// the new version. Mirrors what a user hand-editing the root to add a
+    /// pin would produce, so subsequent `compact_root` calls see the pin.
+    fn overwrite_root_with_pin(
+        kin: &Path,
+        root_name: &str,
+        kino_id: &str,
+        pinned_version: &str,
+        now: &str,
+    ) -> Hash {
+        let prior = read_root_pointer(kin, root_name).unwrap().expect("need prior root");
+        let prior_bytes = ContentStore::new(kin).read(&prior).unwrap();
+        let mut rk = RootKinograph::parse(&prior_bytes).unwrap();
+        for e in rk.entries.iter_mut() {
+            if e.id == kino_id {
+                e.pin = true;
+                e.version = pinned_version.to_owned();
+            }
+        }
+        let bytes = rk.to_styx().unwrap().into_bytes();
+        let events = Ledger::new(kin).read_all_events().unwrap();
+        let prior_root_event = events
+            .iter()
+            .find(|e| e.hash == prior.as_hex())
+            .expect("prior root event present");
+        let stored = store_kino(
+            kin,
+            StoreKinoParams {
+                kind: "root".into(),
+                content: bytes,
+                author: "pin-hack".into(),
+                provenance: "test-pin".into(),
+                ts: now.into(),
+                metadata: BTreeMap::new(),
+                id: Some(prior_root_event.id.clone()),
+                parents: vec![prior.as_hex().to_owned()],
+            },
+        )
+        .unwrap();
+        let new_hash = Hash::from_str(&stored.event.hash).unwrap();
+        write_root_pointer(kin, root_name, &new_hash).unwrap();
+        new_hash
+    }
+
+    /// Count hot event files on disk.
+    fn hot_event_count(kin: &Path) -> usize {
+        let dir = hot_dir(kin);
+        if !dir.exists() {
+            return 0;
+        }
+        let mut n = 0;
+        for shard in fs::read_dir(&dir).unwrap() {
+            let shard = shard.unwrap();
+            if !shard.file_type().unwrap().is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path()).unwrap() {
+                let p = entry.unwrap().path();
+                if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// True iff the hot event file for the given event exists.
+    ///
+    /// Hot events are keyed by `event.event_hash()` (BLAKE3 of the JSON line),
+    /// NOT by `event.hash` (the content/blob hash). Tests that want to assert
+    /// on ledger presence must use this helper rather than comparing
+    /// `event.hash` against directory listings.
+    fn hot_event_exists(kin: &Path, event: &Event) -> bool {
+        let h = event.event_hash().unwrap();
+        hot_event_path(kin, &h).is_file()
+    }
+
+    /// Store `n` successive versions of a kino under a single id chain.
+    /// Returns the events in creation order (v1 first, v_n last).
+    fn store_chain(root: &Path, kino_id: Option<String>, versions: &[(&[u8], &str)]) -> Vec<Event> {
+        let mut out: Vec<Event> = Vec::new();
+        let mut parents: Vec<String> = vec![];
+        let mut id_override = kino_id;
+        for (i, (content, ts)) in versions.iter().enumerate() {
+            let name = format!("chain-{i}");
+            let stored = store_kino(
+                root,
+                StoreKinoParams {
+                    kind: "markdown".into(),
+                    content: content.to_vec(),
+                    author: "yj".into(),
+                    provenance: "chain".into(),
+                    ts: (*ts).into(),
+                    metadata: BTreeMap::from([("name".into(), name)]),
+                    id: id_override.take().or_else(|| out.first().map(|e| e.id.clone())),
+                    parents: parents.clone(),
+                },
+            )
+            .unwrap();
+            parents = vec![stored.event.hash.clone()];
+            out.push(stored.event);
+        }
+        out
+    }
+
+    // -- Root-entry GC under MaxAge + pin --------------------------------
+
+    #[test]
+    fn never_policy_keeps_root_entry_no_matter_how_old() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "never" }
+}
+"#,
+        );
+        // An assign routes it to rfcs. Content ts is 2 years in the past.
+        let k = store_md(&root, b"v", "v", "2024-04-19T10:00:00Z");
+        write_assign_for(&root, &k.id, "rfcs", vec![], "2024-04-19T10:00:01Z");
+        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let ids = root_ids(&root, &res.new_version.unwrap());
+        assert_eq!(ids, vec![k.id], "Never must not drop any entry");
+    }
+
+    #[test]
+    fn max_age_policy_drops_old_unpinned_entry_but_keeps_recent() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "7d" }
+}
+"#,
+        );
+        // Two kinos, both assigned to rfcs. One 8-days old (drop), one 6-days (keep).
+        let old = store_md(&root, b"old", "old", "2026-04-11T10:00:00Z"); // 8d < now
+        let fresh = store_md(&root, b"fresh", "fresh", "2026-04-13T10:00:00Z"); // 6d < now
+        write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-11T10:00:01Z");
+        write_assign_for(&root, &fresh.id, "rfcs", vec![], "2026-04-13T10:00:01Z");
+        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let ids = root_ids(&root, &res.new_version.unwrap());
+        assert_eq!(
+            ids,
+            vec![fresh.id.clone()],
+            "8-day-old entry should be dropped; 6-day-old kept"
+        );
+        assert!(!ids.contains(&old.id));
+    }
+
+    #[test]
+    fn max_age_policy_pin_exempts_old_entry_from_drop() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "7d" }
+}
+"#,
+        );
+        let old = store_md(&root, b"old", "old", "2026-04-05T10:00:00Z"); // 14d old
+        write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-05T10:00:01Z");
+        // First compact — produces a root with the entry. Then pin it.
+        compact_root(&root, "rfcs", params("yj", "2026-04-11T10:00:00Z")).unwrap();
+        overwrite_root_with_pin(&root, "rfcs", &old.id, &old.hash, "2026-04-11T10:00:01Z");
+        // Second compact with a much later `now` — the 14-day-old entry
+        // would normally drop, but pin should exempt it.
+        let res = compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let version = res.new_version.unwrap_or_else(|| res.prior_version.clone().unwrap());
+        let ids = root_ids(&root, &version);
+        assert_eq!(ids, vec![old.id], "pinned old entry must survive");
+    }
+
+    // -- Hot-ledger prune: MaxAge ----------------------------------------
+
+    #[test]
+    fn max_age_hot_ledger_prunes_events_older_than_policy() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "7d" }
+}
+"#,
+        );
+        let old = store_md(&root, b"old", "old", "2026-04-05T10:00:00Z"); // 14d
+        let fresh = store_md(&root, b"fresh", "fresh", "2026-04-18T10:00:00Z"); // 1d
+        write_assign_for(&root, &old.id, "rfcs", vec![], "2026-04-05T10:00:01Z");
+        write_assign_for(&root, &fresh.id, "rfcs", vec![], "2026-04-18T10:00:01Z");
+
+        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        // old's store event must have been pruned; fresh's retained.
+        assert!(
+            !hot_event_exists(&root, &old),
+            "stale hot event should be gone"
+        );
+        assert!(
+            hot_event_exists(&root, &fresh),
+            "fresh hot event should survive"
+        );
+    }
+
+    // -- Hot-ledger prune: KeepLastN -------------------------------------
+
+    #[test]
+    fn keep_last_n_keeps_only_n_most_recent_hot_events_per_kino() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "keep-last-3" }
+}
+"#,
+        );
+        // Five versions of one kino. Oldest first.
+        let chain = store_chain(
+            &root,
+            None,
+            &[
+                (b"v1", "2026-04-01T10:00:00Z"),
+                (b"v2", "2026-04-02T10:00:00Z"),
+                (b"v3", "2026-04-03T10:00:00Z"),
+                (b"v4", "2026-04-04T10:00:00Z"),
+                (b"v5", "2026-04-05T10:00:00Z"),
+            ],
+        );
+        write_assign_for(&root, &chain[0].id, "rfcs", vec![], "2026-04-05T10:00:01Z");
+        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+
+        // v3, v4, v5 survive; v1, v2 get pruned.
+        assert!(!hot_event_exists(&root, &chain[0]), "v1 should be pruned");
+        assert!(!hot_event_exists(&root, &chain[1]), "v2 should be pruned");
+        assert!(hot_event_exists(&root, &chain[2]), "v3 should survive");
+        assert!(hot_event_exists(&root, &chain[3]), "v4 should survive");
+        assert!(hot_event_exists(&root, &chain[4]), "v5 should survive");
+    }
+
+    #[test]
+    fn keep_last_n_pin_on_version_1_survives_plus_three_newest() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "keep-last-3" }
+}
+"#,
+        );
+        let chain = store_chain(
+            &root,
+            None,
+            &[
+                (b"v1", "2026-04-01T10:00:00Z"),
+                (b"v2", "2026-04-02T10:00:00Z"),
+                (b"v3", "2026-04-03T10:00:00Z"),
+                (b"v4", "2026-04-04T10:00:00Z"),
+                (b"v5", "2026-04-05T10:00:00Z"),
+            ],
+        );
+        write_assign_for(&root, &chain[0].id, "rfcs", vec![], "2026-04-05T10:00:01Z");
+        compact_root(&root, "rfcs", params("yj", "2026-04-05T11:00:00Z")).unwrap();
+        // Pin the root entry to v1 explicitly. This simulates a hand-edit.
+        overwrite_root_with_pin(&root, "rfcs", &chain[0].id, &chain[0].hash, "2026-04-05T11:30:00Z");
+        // Next compact runs the full KeepLastN(3) sweep.
+        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        // v1 pinned → survives; v3, v4, v5 are the 3 newest → survive; v2 pruned.
+        assert!(hot_event_exists(&root, &chain[0]), "v1 pinned, must survive");
+        assert!(!hot_event_exists(&root, &chain[1]), "v2 not in top-3, not pinned → pruned");
+        assert!(hot_event_exists(&root, &chain[2]), "v3 in top-3, survives");
+        assert!(hot_event_exists(&root, &chain[3]), "v4 in top-3, survives");
+        assert!(hot_event_exists(&root, &chain[4]), "v5 in top-3, survives");
+    }
+
+    // -- Hot-ledger prune baseline: fresh events untouched ----------------
+
+    #[test]
+    fn fresh_hot_events_untouched_by_policy() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "7d" }
+}
+"#,
+        );
+        // Two events, both under 7 days old.
+        let a = store_md(&root, b"a", "a", "2026-04-18T10:00:00Z");
+        let b = store_md(&root, b"b", "b", "2026-04-19T09:00:00Z");
+        write_assign_for(&root, &a.id, "rfcs", vec![], "2026-04-18T10:00:01Z");
+        write_assign_for(&root, &b.id, "rfcs", vec![], "2026-04-19T09:00:01Z");
+        let count_before = hot_event_count(&root);
+        compact_root(&root, "rfcs", params("yj", "2026-04-19T10:00:00Z")).unwrap();
+        let count_after = hot_event_count(&root);
+        // Compact adds a root event (+1) but must not drop the two user + two assign events.
+        assert!(
+            count_after >= count_before,
+            "fresh events must survive: before={count_before}, after={count_after}"
+        );
+        assert!(hot_event_exists(&root, &a));
+        assert!(hot_event_exists(&root, &b));
+    }
 }

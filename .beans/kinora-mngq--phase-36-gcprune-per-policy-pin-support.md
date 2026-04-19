@@ -1,11 +1,11 @@
 ---
 # kinora-mngq
 title: 'Phase 3.6: GC/prune per policy + pin support'
-status: todo
+status: in-progress
 type: task
 priority: normal
 created_at: 2026-04-19T10:18:49Z
-updated_at: 2026-04-19T10:18:53Z
+updated_at: 2026-04-19T12:16:55Z
 parent: kinora-hxmw
 blocked_by:
     - kinora-c48l
@@ -46,3 +46,40 @@ Sixth piece of phase 3 (kinora-hxmw). Enforces the per-root retention policies d
 - [ ] Zero compiler warnings
 - [ ] Bean todo items all checked off
 - [ ] Summary of Changes section added at completion
+
+## Plan
+
+### Semantics (explicit interpretation)
+
+**Root-entry GC (affects the root kinograph):**
+- `Never` → no entry is dropped
+- `MaxAge(d)` → drop entries whose `version` event `ts` is older than `now - d`, unless `pin: true`
+- `KeepLastN(n)` → does not affect root entries (the root kinograph has at most one entry per kino by `pick_head`; KeepLastN acts on the hot ledger, not the root view)
+
+**Hot-ledger pruning (affects `.kinora/hot/`):**
+- After a successful `compact_root(Y)`, prune hot events whose owning root is `Y`. Ownership is the routing decision: store events routed to Y, plus all assign events with `target_root == Y` (live or superseded).
+- `Never` → no hot event dropped
+- `MaxAge(d)` → drop hot events with `ts < now - d`, unless pinned
+- `KeepLastN(n)` → for each kino id, keep the N newest store events by `ts`; older store events are candidates to drop. Assign events have no N-window (policy only prunes by MaxAge).
+
+**Pin semantics:**
+- `pin: true` on a `RootEntry` protects that entry *and* its `version` field from GC.
+- The HOT event whose hash matches a pinned entry's `version` also survives, regardless of `MaxAge` / `KeepLastN`.
+- Pin does not propagate to other events of the same kino id — only the specific pinned version is protected.
+
+**Pin propagation across rebuilds:**
+- `build_root` inherits pinned entries verbatim from the prior root kinograph for kinos still owned by this root. This preserves hand-edits and the specific `version` referenced by a pinned entry.
+- Unpinned entries are rebuilt from `pick_head` as before.
+- If a kino is reassigned away from root Y, its pinned entry in Y is dropped on the next compact (ownership wins over pin for routing).
+
+**Timestamp reference:** GC uses `params.ts` (the compact run's own timestamp) as `now`. Tests can exercise boundaries by passing explicit past `ts` values to `store_kino` and a known `params.ts`.
+
+**Duration parsing:** `RootPolicy::max_age_seconds()` returns `Some(i64)` for `MaxAge("<N><s|m|h|d|w|y>")` and `None` otherwise. `y = 365d` (calendar-agnostic).
+
+**Cross-root integrity (deferred to f0rg):** this bean does not check whether a kino's version is referenced from another root's composition. f0rg will add that check before the drop.
+
+### Commit sequence
+
+1. `test(compact): mngq GC/prune/pin — failing tests`
+2. `feat(compact): policy-driven GC + hot-ledger pruning + pin propagation`
+3. (optional) review-fix commit
