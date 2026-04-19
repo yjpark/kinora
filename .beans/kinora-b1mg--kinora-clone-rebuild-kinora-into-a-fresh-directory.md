@@ -1,13 +1,14 @@
 ---
 # kinora-b1mg
 title: 'kinora clone: rebuild .kinora/ into a fresh directory'
-status: todo
+status: draft
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:05Z
-updated_at: 2026-04-19T15:29:55Z
+updated_at: 2026-04-19T15:51:48Z
 blocked_by:
     - kinora-jezf
+    - kinora-q6bo
 ---
 
 ## Why
@@ -67,3 +68,21 @@ Summary on stdout:
 - Clone errors cleanly if src has dirty staged, with a pointer to `kinora commit`
 - Hash mismatch in src surfaces as a clear error
 - Zero warnings, all tests pass
+
+## Blocked: implicitly depends on kinora-q6bo
+
+Attempted to execute during night shift; hit a spec contradiction that can't be resolved without q6bo (staged-cleanup-after-commit) landing first.
+
+**The contradiction:**
+- Bean step 1: "staged ledger must be empty. If non-empty, error."
+- Bean step 5: "Staged ledger: dst has an empty `.kinora/staged/`"
+- Today (pre-q6bo), every event — committed or not — lives permanently in `.kinora/staged/`. There is no path that produces an empty staged. Every repo is "dirty" by the bean's contract.
+
+**Why we can't just drop the empty-staged check:**
+- If clone ignores staged, dst has no events → `Resolver::load` returns empty → `kinora resolve` and `kinora render` on dst don't work → breaks acceptance criterion "produces a dst that kinora render/resolve treats identically to src".
+- If clone copies staged events verbatim, dst's staged is not empty → contradicts step 5.
+- The bean assumes a post-q6bo world where staged is transient and ledger (or the new `commits` root archive) holds the authoritative history. In that world, clone copies the committed archive, leaves staged empty, and resolver walks the archive.
+
+**Resolution:** landing q6bo first unblocks b1mg naturally — the commit lifecycle will have moved history out of staged into a stable location clone can copy. Marking this bean blocked-by kinora-q6bo and draft until the q6bo design questions are resolved.
+
+Also amending the bean spec here implicitly: b1mg's "depends on" section originally said q6bo was *not strictly required*. After attempting execution I disagree — it IS strictly required, for the reason above.

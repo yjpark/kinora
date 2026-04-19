@@ -1,11 +1,11 @@
 ---
 # kinora-tx3e
 title: 'Styx formatting: multiline writer + kinora reformat command'
-status: todo
+status: draft
 type: feature
 priority: normal
 created_at: 2026-04-19T15:12:02Z
-updated_at: 2026-04-19T15:29:55Z
+updated_at: 2026-04-19T16:01:04Z
 blocked_by:
     - kinora-jezf
 ---
@@ -114,3 +114,56 @@ Deliberately not supported in the end-user CLI. Reformatting one kino in isolati
 - `kinora reformat` on a repo with legacy single-line styx files stages new multiline versions; `kinora commit` lands them; `kinora render` shows unchanged user-visible output
 - Idempotent on already-multiline repos (zero staged events)
 - Zero compiler warnings, all tests pass
+
+## Blocked: .multiline() is insufficient for nested inline-started structs
+
+Marked back to draft during night shift after attempting Part 1 (writer switch). Empirical test proves the proposed approach does not achieve multiline output for our data shape.
+
+### What was tried
+
+Added `crates/kinora/src/styx.rs` with a helper:
+
+```rust
+pub fn to_string<'facet, T>(value: &T) -> Result<String, SerializeError<StyxSerializeError>>
+where T: Facet<'facet> + ?Sized,
+{
+    let opts = SerializeOptions::default().multiline();
+    to_string_with_options(value, &opts)
+}
+```
+
+Switched all three call sites (`config.rs`, `root.rs`, `kinograph.rs`) to use it. Added a test asserting `RootKinograph { entries: [3 entries] }.to_styx()` produces `s.lines().count() > 1`.
+
+The test FAILS. Output is a single line ~700 chars wide:
+
+```
+entries ({id 0101..., version 6565..., kind markdown, metadata {name name-1}, note "", pin false} {id 0202..., ...} {id 0303..., ...})
+```
+
+### Why it doesn't work
+
+Inspected styx-format 3.0.2 writer.rs. At `begin_struct` (line 195), non-root structs are always created with `force_multiline: false` and `inline_start: true`. At `field_key` (line 326):
+
+```rust
+let struct_is_inline = inline_start && !force_multiline;
+let should_inline = struct_is_inline || self.should_inline();
+```
+
+This short-circuits: `struct_is_inline = true` regardless of `ForceStyle::Multiline`. The writer's `should_inline()` check (which DOES respect `ForceStyle::Multiline` at line 131) is bypassed for any struct that started inline. Every non-root struct in our kinograph shape starts inline, so they all stay inline.
+
+Same pattern for sequences at `begin_seq` (line 409): `inline_start: true` is hardcoded, and `before_value` (line 859) checks `inline_start || self.should_inline()` — `inline_start` wins.
+
+Net effect: `FormatOptions::default().multiline()` only causes newlines between *direct* fields of the root struct. Nested struct/seq content stays inline.
+
+### Why `format_source` post-pass also won't help
+
+cst_format.rs:292 determines multiline layout purely from the parsed CST's separator tokens (`Separator::Newline | Separator::Mixed`). It does NOT consult `FormatOptions.force_style`. Since our current output uses comma separators everywhere, `format_source(serialized, FormatOptions::default().multiline())` would preserve the inline layout unchanged.
+
+### Decision points for a future session
+
+1. **Upstream fix:** file an issue / PR on `facet-styx` / `styx-format` so `ForceStyle::Multiline` actually forces multiline. Likely the cleanest path but requires coordination.
+2. **Fork or vendor:** maintain a local patched copy of facet-styx with the fix.
+3. **Post-process manually:** since our data shapes are known and simple, write a targeted pretty-printer (detect top-level seq, break entries onto separate lines, re-emit). Fragile.
+4. **Wait for upstream:** park this work; readability isn't blocking core functionality.
+
+Leaving for user to decide direction. Reverted uncommitted code changes (new `styx.rs`, call-site updates, failing test) so the tree stays clean.

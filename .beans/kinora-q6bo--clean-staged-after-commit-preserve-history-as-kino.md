@@ -1,11 +1,11 @@
 ---
 # kinora-q6bo
 title: Clean staged after commit; preserve history as kino in 'commits' root
-status: todo
+status: draft
 type: feature
 priority: normal
 created_at: 2026-04-19T14:39:21Z
-updated_at: 2026-04-19T15:29:55Z
+updated_at: 2026-04-19T15:47:21Z
 blocked_by:
     - kinora-2t6l
 ---
@@ -46,3 +46,21 @@ After a successful commit:
 - Default render ignores the archive root
 - Tests cover: clean-after-commit, archive content matches consumed events in order, partial-failure recovery
 - Zero compiler warnings
+
+## Blocked: design ambiguity
+
+Marked back to draft during night shift after attempting to execute.
+
+**Open design questions that warrant user input:**
+
+1. **Per-root vs per-run archive granularity.** `kinora commit` produces multiple root versions in one run. The bean says archive identity = "commit hash" (singular), but there's no per-run hash today. Per-root (identity = root's new_version hash) is cleaner, but "1:1 with commits" wording is ambiguous.
+
+2. **Recursion: how does the `commits` root commit itself?** Each commit run creates archive kinos assigned to `commits`. Committing `commits` would then consume those assigns and create a new archive, which would be assigned to `commits`, triggering another commit. Either: (a) `commits` is special-cased to skip archive creation for itself, or (b) the commit pipeline walks roots in a fixed order and `commits` last, accepting a one-behind state. Needs a call.
+
+3. **Is `commits` a reserved root or a user-declared root?** Reserved (hardcoded, auto-created) is simpler but less discoverable. User-declared (in config.styx with an auto-bootstrap migration) is more consistent but adds migration work.
+
+4. **`keep-all` policy:** current `RootPolicy` variants (in `config.rs`) may or may not cover this. Needs either a new variant or documentation that existing policies suffice.
+
+5. **Render exclusion signal:** the bean says "like root-kind kinos are skipped". The render layer would need either (a) a config field marking a root as infrastructure, or (b) a hardcoded name check for `commits`. (a) is more extensible; (b) simpler. Needs a call.
+
+Leaving for user to resolve in a follow-up session; proceeding to kinora-b1mg next.
