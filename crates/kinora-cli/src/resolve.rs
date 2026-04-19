@@ -281,8 +281,10 @@ mod tests {
             store_kino(&root, p).unwrap();
         }
 
-        // Clear HEAD so the branch-aware tiebreaker doesn't pick a head.
-        std::fs::remove_file(kinora::paths::head_path(&root)).unwrap();
+        // HEAD is no longer written by the hot ledger, but older workspaces
+        // may still have it — remove best-effort so the legacy tiebreak
+        // cannot accidentally resolve the fork.
+        let _ = std::fs::remove_file(kinora::paths::head_path(&root));
 
         let args = ResolveRunArgs {
             name_or_id: birth.event.id.clone(),
@@ -309,7 +311,7 @@ mod tests {
             p.ts = ts.into();
             store_kino(&root, p).unwrap();
         }
-        std::fs::remove_file(kinora::paths::head_path(&root)).unwrap();
+        let _ = std::fs::remove_file(kinora::paths::head_path(&root));
 
         let args = ResolveRunArgs {
             name_or_id: birth.event.id.clone(),

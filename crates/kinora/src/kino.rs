@@ -90,13 +90,20 @@ pub struct StoreKinoParams {
 #[derive(Debug)]
 pub struct StoredKino {
     pub event: Event,
+    /// Shorthash of the event hash (first 8 hex chars). The "lineage"
+    /// terminology is retained for CLI back-compat — under the hot-ledger
+    /// layout (kinora-xi21) each event lives in its own file, so per-event
+    /// and per-lineage identity coincide.
     pub lineage: String,
+    /// True iff this event's hot-ledger file did not already exist — i.e.
+    /// this call introduced a new event. Idempotent re-stores return false.
     pub was_new_lineage: bool,
 }
 
-/// Write `params.content` to the content store (deduped) and append a
-/// ledger event describing this version. Mints a new lineage file when
-/// HEAD is absent; otherwise appends to the current lineage.
+/// Write `params.content` to the content store (deduped) and record the
+/// corresponding event in the hot ledger (`.kinora/hot/<ab>/<event-hash>.jsonl`).
+/// Idempotent at the event-hash level: re-storing the same logical event
+/// is a no-op on disk and returns `was_new_lineage=false`.
 pub fn store_kino(
     kinora_root: &Path,
     params: StoreKinoParams,
@@ -139,16 +146,8 @@ pub fn store_kino(
     validate::validate_event_shape(&event)?;
     validate::validate_parents_exist(&store, &event)?;
 
-    // MVP: one lineage per repo. HEAD-absent mints; HEAD-present appends.
-    // Per kinora-5k13 design, per-branch (or per-identity) lineage
-    // partitioning is deferred — multiple identities can coexist in one
-    // lineage for now; identity lives in `event.id`, not the filename.
-    let was_new_lineage = ledger.current_lineage()?.is_none();
-    let lineage = if was_new_lineage {
-        ledger.mint_and_append(&event)?
-    } else {
-        ledger.append_to_head(&event)?
-    };
+    let (event_hash, was_new_lineage) = ledger.write_event(&event)?;
+    let lineage = event_hash.shorthash().to_owned();
 
     Ok(StoredKino { event, lineage, was_new_lineage })
 }
@@ -194,15 +193,31 @@ mod tests {
     }
 
     #[test]
-    fn second_store_appends_to_same_lineage() {
+    fn each_store_creates_a_distinct_hot_event_file() {
+        // Under the hot-ledger layout each event lives in its own file. Two
+        // stores of different content produce two distinct event files, and
+        // both events should be readable via `read_all_events`.
         let (_tmp, root) = setup();
         let first = store_kino(&root, params("markdown", b"a")).unwrap();
         let second = store_kino(&root, params("markdown", b"b")).unwrap();
         assert!(first.was_new_lineage);
-        assert!(!second.was_new_lineage);
-        assert_eq!(first.lineage, second.lineage);
-        let events = Ledger::new(&root).read_lineage(&first.lineage).unwrap();
+        assert!(second.was_new_lineage);
+        assert_ne!(first.lineage, second.lineage);
+        let events = Ledger::new(&root).read_all_events().unwrap();
         assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn re_storing_the_same_event_is_idempotent_on_disk() {
+        let (_tmp, root) = setup();
+        let first = store_kino(&root, params("markdown", b"dup")).unwrap();
+        let second = store_kino(&root, params("markdown", b"dup")).unwrap();
+        assert!(first.was_new_lineage);
+        assert!(!second.was_new_lineage, "same event twice should not be new");
+        assert_eq!(first.event, second.event);
+        assert_eq!(first.lineage, second.lineage);
+        let events = Ledger::new(&root).read_all_events().unwrap();
+        assert_eq!(events.len(), 1);
     }
 
     #[test]
@@ -268,23 +283,23 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_skips_blob_rewrite_but_still_appends_event() {
+    fn dedupe_skips_blob_rewrite_but_still_records_distinct_events() {
         let (_tmp, root) = setup();
         let first = store_kino(&root, params("markdown", b"same")).unwrap();
         let hash = Hash::from_str(&first.event.hash).unwrap();
         let blob_path = store_blob_path(&root, &hash);
         let mtime_before = std::fs::metadata(&blob_path).unwrap().modified().unwrap();
 
-        // Same content, new birth event — identity-level duplicate birth is
-        // not a data-layer concern. Here we just verify the blob is not
-        // rewritten and the ledger still accepts the event.
+        // Same content, different `ts` → different logical event → different
+        // event hash → separate file. The content blob is deduped, but each
+        // event lives in its own hot file.
         let mut p = params("markdown", b"same");
         p.ts = "2026-04-18T10:00:01Z".into();
         let _second = store_kino(&root, p).unwrap();
 
         let mtime_after = std::fs::metadata(&blob_path).unwrap().modified().unwrap();
         assert_eq!(mtime_before, mtime_after, "blob rewritten");
-        let events = Ledger::new(&root).read_lineage(&first.lineage).unwrap();
+        let events = Ledger::new(&root).read_all_events().unwrap();
         assert_eq!(events.len(), 2);
     }
 

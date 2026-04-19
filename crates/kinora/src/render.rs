@@ -707,30 +707,25 @@ mod tests {
 
     #[test]
     fn forked_identity_is_surfaced_as_skipped_with_reason() {
-        // Build an unambiguous fork: HEAD points at a lineage that contains
-        // neither head, so the branch-aware tiebreaker can't pick a winner.
+        // Under the hot-ledger layout every event has its own file, so a
+        // fork is simply two sibling versions off the same parent — no HEAD
+        // manipulation needed.
         let (_t, root) = setup();
         let birth = store_kino(&root, params("markdown", b"v1", "forked")).unwrap();
 
-        // Left head in a fresh lineage.
-        std::fs::remove_file(crate::paths::head_path(&root)).unwrap();
         let mut a = params("markdown", b"left", "forked");
         a.id = Some(birth.event.id.clone());
         a.parents = vec![birth.event.hash.clone()];
         a.ts = "2026-04-18T10:00:01Z".into();
         store_kino(&root, a).unwrap();
 
-        // Right head in another fresh lineage.
-        std::fs::remove_file(crate::paths::head_path(&root)).unwrap();
         let mut b = params("markdown", b"right", "forked");
         b.id = Some(birth.event.id.clone());
         b.parents = vec![birth.event.hash.clone()];
         b.ts = "2026-04-18T10:00:02Z".into();
         store_kino(&root, b).unwrap();
 
-        // Independent "clean" identity; HEAD now points to its (fourth)
-        // lineage, which contains neither forked head.
-        std::fs::remove_file(crate::paths::head_path(&root)).unwrap();
+        // Independent "clean" identity still renders.
         store_kino(&root, params("markdown", b"ok", "clean")).unwrap();
 
         let resolver = Resolver::load(&root).unwrap();

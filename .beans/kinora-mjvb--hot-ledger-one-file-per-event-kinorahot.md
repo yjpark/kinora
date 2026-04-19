@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T05:46:36Z
-updated_at: 2026-04-19T05:52:33Z
+updated_at: 2026-04-19T06:00:42Z
 parent: kinora-xi21
 ---
 
@@ -52,14 +52,14 @@ Existing `.kinora/ledger/<shorthash>.jsonl` files are read at load time and thei
 
 ## Acceptance
 
-- [ ] New `.kinora/hot/<ab>/<event-hash>.jsonl` layout implemented in `kinora::ledger`
-- [ ] Canonical event encoding + event-hash computation
-- [ ] `store` writes to `hot/` (not `ledger/`)
-- [ ] Readers transparently union events from both `ledger/` (legacy) and `hot/` (new) for migration
-- [ ] Dedup by event hash is idempotent (same event stored twice = one file)
-- [ ] Tests: write+read roundtrip, dedup, cross-branch merge simulation, legacy ledger coexistence
-- [ ] Zero compiler warnings
-- [ ] Existing CLI tests (`store`, `resolve`, `render`) pass unchanged
+- [x] New `.kinora/hot/<ab>/<event-hash>.jsonl` layout implemented in `kinora::ledger`
+- [x] Canonical event encoding + event-hash computation
+- [x] `store` writes to `hot/` (not `ledger/`)
+- [x] Readers transparently union events from both `ledger/` (legacy) and `hot/` (new) for migration
+- [x] Dedup by event hash is idempotent (same event stored twice = one file)
+- [x] Tests: write+read roundtrip, dedup, cross-branch merge simulation, legacy ledger coexistence
+- [x] Zero compiler warnings
+- [x] Existing CLI tests (`store`, `resolve`, `render`) pass unchanged
 
 ## Non-goals (deferred to later phases)
 

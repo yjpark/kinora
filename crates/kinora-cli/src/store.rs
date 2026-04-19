@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(stored.event.author, "YJ");
         assert_eq!(stored.event.metadata.get("name").unwrap(), "doc");
         let events = Ledger::new(kinora_root(tmp.path()))
-            .read_lineage(&stored.lineage)
+            .read_all_events()
             .unwrap();
         assert_eq!(events.len(), 1);
     }
