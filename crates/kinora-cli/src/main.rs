@@ -10,6 +10,7 @@ use logforth::append::{FastraceEvent, Stderr};
 use logforth::diagnostic::FastraceDiagnostic;
 use logforth::filter::env_filter::EnvFilterBuilder;
 use logforth::record::LevelFilter;
+use reformat::{format_reformat_summary, run_reformat, ReformatRunArgs};
 use render::{run_render, RenderRunArgs};
 use resolve::{
     head_lineages, render_all_heads, render_fork_report, run_resolve, ResolveOutcome,
@@ -22,6 +23,7 @@ mod assign;
 mod cli;
 mod common;
 mod commit;
+mod reformat;
 mod render;
 mod resolve;
 mod store;
@@ -175,6 +177,16 @@ fn run() -> ExitCode {
                     }
                 }
                 Err(e) => report_err("commit", e),
+            }
+        }
+        Command::Reformat { author, provenance } => {
+            let args = ReformatRunArgs { author, provenance };
+            match run_reformat(&cwd, args) {
+                Ok(report) => {
+                    println!("{}", format_reformat_summary(&report));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => report_err("reformat", e),
             }
         }
         Command::Resolve { name_or_id, version, all_heads } => {

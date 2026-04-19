@@ -139,4 +139,20 @@ pub enum Command {
         #[facet(args::named, default)]
         provenance: Option<String>,
     },
+
+    /// Migrate legacy `.styx`-wrapped kinograph blobs to the styxl
+    /// one-entry-per-line format. Walks reachable kinograph kinos from each
+    /// root's current head, stages new-version events for regular
+    /// kinographs, and rewrites root blobs + pointers in place. Idempotent
+    /// on repos whose blobs are already styxl. Run `kinora commit`
+    /// afterwards to promote the staged versions to heads.
+    Reformat {
+        /// Override author (defaults to `user.name` from git config).
+        #[facet(args::named, default)]
+        author: Option<String>,
+
+        /// Provenance of this reformat run. Defaults to `reformat`.
+        #[facet(args::named, default)]
+        provenance: Option<String>,
+    },
 }
