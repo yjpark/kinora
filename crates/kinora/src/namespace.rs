@@ -19,6 +19,7 @@ pub const RESERVED_KINDS: &[&str] = &[
     "text",
     "binary",
     "kinograph",
+    "root",
 ];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -89,6 +90,7 @@ pub fn ext_for_kind(kind: &str) -> Option<&'static str> {
         "markdown" => Some("md"),
         "text" => Some("txt"),
         "kinograph" => Some("styx"),
+        "root" => Some("styx"),
         "binary" => None,
         _ => None,
     }
@@ -171,6 +173,7 @@ mod tests {
         assert_eq!(ext_for_kind("markdown"), Some("md"));
         assert_eq!(ext_for_kind("text"), Some("txt"));
         assert_eq!(ext_for_kind("kinograph"), Some("styx"));
+        assert_eq!(ext_for_kind("root"), Some("styx"));
         assert_eq!(ext_for_kind("binary"), None);
     }
 
