@@ -1,11 +1,11 @@
 ---
 # kinora-8l4w
 title: 'Logging: fastrace spans + logforth init + debug logs at silent error sites'
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-04-19T13:33:45Z
-updated_at: 2026-04-19T13:44:57Z
+updated_at: 2026-04-19T13:47:23Z
 ---
 
 Wire fastrace + logforth into kinora-cli so library calls emit structured spans and swallowed errors surface as debug logs. Keeps the nominal error enums unchanged — error-handling migration to rootcause is deferred to a follow-up bean.
