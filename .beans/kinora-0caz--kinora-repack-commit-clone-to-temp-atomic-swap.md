@@ -1,11 +1,11 @@
 ---
 # kinora-0caz
 title: 'kinora repack: commit + clone-to-temp + atomic swap'
-status: todo
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:31Z
-updated_at: 2026-04-19T15:29:55Z
+updated_at: 2026-04-20T13:55:42Z
 blocked_by:
     - kinora-b1mg
 ---
@@ -64,3 +64,29 @@ When pack files land, `repack` will be the natural place to trigger pack generat
 - No lingering temp dirs after success
 - Clear error if previous repack left state behind (`.kinora.repack-tmp` / `.kinora.repack-old` exists)
 - Zero warnings, all tests pass
+
+## Summary of Changes
+
+Landed in three commits on main:
+
+- `70186ee` test(repack): spec commit+clone+swap semantics — 6 failing tests + type stubs.
+- `e074133` feat(repack): commit + clone-to-temp + atomic swap — full `kinora::repack::repack_repo` with two-rename swap + rollback.
+- `e5c0ad8` feat(cli): add `kinora repack` command — CLI wrapper + review fix (doc-comment correction on `.repack-old` cleanup).
+
+### Design deviations from the bean spec
+
+1. **Git-dirty safety rail was deferred.** The bean listed "refuse to run if `.kinora/` has uncommitted git changes" as a design decision, but it's not in the acceptance criteria and would require either a `gix::status` walk (substantial code) or shelling out to `git`. Neither fits a single-session night-shift task. Callers who want this rail can add it downstream; repack today assumes the user has already committed or is fine with replacing the dir.
+2. **No `--repo-root` / `-C` special-casing for repack.** Repack uses the normal `find_repo_root` walk-up that every other subcommand uses. The global `-C` flag resolves to the repo root in `main.rs` before dispatch, so `-C` works transparently.
+3. **`CommitRootFailed` bails entirely.** `commit_all` returns per-root results without short-circuiting (clean roots still advance even when a sibling errors). Repack does not adopt that behavior — if any root failed to commit, repack refuses to swap. Rationale: swapping into a state where some roots are stale and others aren't would be hard to reason about, and the user can re-run repack after fixing the failing root.
+4. **Rollback path is not covered by a test.** The two-rename critical section has straightforward rollback logic (on rename-2 failure, rename-1 is undone), but simulating rename-2 failure reliably is awkward on Linux without root. The reviewer agent and I both agreed this was acceptable to defer.
+
+### What's covered by tests
+
+- Library (6 tests): empty-repo success, preflight errors for lingering `.repack-tmp` / `.repack-old`, pending staged events getting committed before the swap, no lingering siblings after success, legacy extensionless filename rewrite through the clone step.
+- CLI (7 tests): empty-repo success, outside-kinora-repo error, author-unresolved error, provenance default, summary rendering at zero / one / multi-commit counts with no-op lines filtered out.
+
+### Not addressed (out of scope)
+
+- Pack-file integration — repack is the natural home when packs land, but packs aren't in scope here.
+- Git-dirty safety rail (see deviation 1).
+- Concurrent-process protection during the brief window between the two renames — the bean explicitly accepts this as acceptable.
