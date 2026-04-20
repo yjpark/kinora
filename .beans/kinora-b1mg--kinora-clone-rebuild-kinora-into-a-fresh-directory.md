@@ -5,7 +5,7 @@ status: in-progress
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:05Z
-updated_at: 2026-04-20T13:31:33Z
+updated_at: 2026-04-20T13:32:13Z
 blocked_by:
     - kinora-jezf
     - kinora-q6bo
@@ -128,7 +128,7 @@ Follow the `kinora reformat` / `kinora commit` pattern:
 ### Todos
 
 - [x] Phase A: library clone module — tests first (empty repo, one-kino repo, reachable walk, hash verification, staged-non-empty error)
-- [ ] Phase A: library clone module — impl
+- [x] Phase A: library clone module — impl
 - [ ] Phase B: CLI `kinora clone` — tests + impl
 - [ ] Phase C: review + fixes
 

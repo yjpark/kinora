@@ -9,18 +9,38 @@
 //!
 //! Both arguments are direct paths to `.kinora/` dirs — clone does not
 //! walk up looking for a repo root.
+//!
+//! Reachability walk:
+//!
+//! 1. Every declared root's pointer → root-blob hash reachable.
+//! 2. Parse the root blob; each `RootEntry`'s `version` hash reachable.
+//! 3. For entries of kind `kinograph`, recurse via staged events' head
+//!    (same `pick_head` rule as `reformat`) into composition-entry ids.
+//!
+//! Staged events are copied selectively: store events whose blob hash is
+//! reachable, plus every non-store event (assigns carry routing state
+//! that the dst resolver would otherwise lack).
 
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use crate::commit::CommitError;
-use crate::config::ConfigError;
-use crate::event::EventError;
-use crate::hash::HashParseError;
-use crate::kinograph::KinographError;
-use crate::ledger::LedgerError;
-use crate::root::RootError;
-use crate::store::StoreError;
+use crate::commit::{read_root_pointer, CommitError};
+use crate::config::{Config, ConfigError};
+use crate::event::{Event, EventError};
+use crate::hash::{Hash, HashParseError};
+use crate::kinograph::{Kinograph, KinographError};
+use crate::ledger::{Ledger, LedgerError};
+use crate::namespace::ext_for_kind;
+use crate::paths::{
+    config_path, find_blob_path, ledger_dir, root_pointer_path, roots_dir, staged_dir,
+    staged_event_path, store_dir, STAGED_EXT,
+};
+use crate::root::{RootError, RootKinograph};
+use crate::store::{ContentStore, StoreError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CloneError {
@@ -81,32 +101,266 @@ pub struct CloneReport {
 
 /// Rebuild `src` into `dst`.
 pub fn clone_repo(
-    _src: &Path,
-    _dst: &Path,
+    src: &Path,
+    dst: &Path,
     _params: CloneParams,
 ) -> Result<CloneReport, CloneError> {
-    todo!("kinora-b1mg Phase A impl commit");
+    let src_cfg_path = config_path(src);
+    if !src_cfg_path.is_file() {
+        return Err(CloneError::SrcInvalid { path: src.to_path_buf() });
+    }
+    let cfg_text = fs::read_to_string(&src_cfg_path)?;
+    let config = Config::from_styx(&cfg_text)?;
+
+    ensure_dst_empty(dst)?;
+    fs::create_dir_all(dst)?;
+    fs::write(config_path(dst), &cfg_text)?;
+    fs::create_dir_all(store_dir(dst))?;
+    fs::create_dir_all(ledger_dir(dst))?;
+    fs::create_dir_all(staged_dir(dst))?;
+    fs::create_dir_all(roots_dir(dst))?;
+
+    let src_store = ContentStore::new(src);
+    let dst_store = ContentStore::new(dst);
+    let src_ledger = Ledger::new(src);
+    let events = src_ledger.read_all_events()?;
+    let events_by_id = group_store_events_by_id(&events);
+
+    // reachable_blobs: set of reachable blob hashes (hex).
+    // reachable_kinds: first-seen kind for each reachable hash — chosen
+    //   so ContentStore::write emits the correct dst extension. Root
+    //   entries carry the authoritative kind, so we prefer them; falls
+    //   back to the ledger-event kind for composition walks.
+    let mut reachable_blobs: HashSet<String> = HashSet::new();
+    let mut reachable_kinds: BTreeMap<String, String> = BTreeMap::new();
+
+    let mut id_queue: Vec<String> = Vec::new();
+    let mut visited_ids: HashSet<String> = HashSet::new();
+
+    for root_name in config.roots.keys() {
+        let Some(root_hash) = read_root_pointer(src, root_name)? else {
+            continue;
+        };
+        let hex = root_hash.as_hex().to_owned();
+        reachable_blobs.insert(hex.clone());
+        reachable_kinds.insert(hex, "root".to_owned());
+        let content = src_store.read(&root_hash)?;
+        let rk = RootKinograph::parse(&content)?;
+        for entry in &rk.entries {
+            let version = Hash::from_str(&entry.version).map_err(|err| {
+                CloneError::InvalidHash {
+                    value: entry.version.clone(),
+                    err,
+                }
+            })?;
+            let vhex = version.as_hex().to_owned();
+            reachable_blobs.insert(vhex.clone());
+            reachable_kinds
+                .entry(vhex)
+                .or_insert_with(|| entry.kind.clone());
+            if entry.kind == "kinograph" {
+                id_queue.push(entry.id.clone());
+            }
+        }
+    }
+
+    while let Some(id) = id_queue.pop() {
+        if !visited_ids.insert(id.clone()) {
+            continue;
+        }
+        let Some(group) = events_by_id.get(&id) else {
+            continue;
+        };
+        let head = pick_head(&id, group)?;
+        let head_hash = Hash::from_str(&head.hash).map_err(|err| {
+            CloneError::InvalidHash {
+                value: head.hash.clone(),
+                err,
+            }
+        })?;
+        let hex = head_hash.as_hex().to_owned();
+        reachable_blobs.insert(hex.clone());
+        reachable_kinds
+            .entry(hex)
+            .or_insert_with(|| head.kind.clone());
+        if head.kind != "kinograph" {
+            continue;
+        }
+        let content = src_store.read(&head_hash)?;
+        let kg = Kinograph::parse(&content)?;
+        for entry in &kg.entries {
+            if !visited_ids.contains(&entry.id) {
+                id_queue.push(entry.id.clone());
+            }
+        }
+    }
+
+    let src_blobs = enumerate_blobs(src)?;
+    let mut report = CloneReport::default();
+
+    for hex in &reachable_blobs {
+        let hash = Hash::from_str(hex).map_err(|err| CloneError::InvalidHash {
+            value: hex.clone(),
+            err,
+        })?;
+        let content = src_store.read(&hash)?;
+        let kind = reachable_kinds
+            .get(hex)
+            .map(String::as_str)
+            .unwrap_or("binary");
+        let src_path = find_blob_path(src, &hash).ok_or_else(|| {
+            CloneError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("reachable blob vanished from src: {hex}"),
+            ))
+        })?;
+        let src_name = src_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let canonical_name = match ext_for_kind(kind) {
+            Some(e) => format!("{}.{e}", hash.as_hex()),
+            None => hash.as_hex().to_owned(),
+        };
+        if src_name != canonical_name {
+            report.filenames_rewritten += 1;
+        }
+        dst_store.write(kind, &content)?;
+        report.kinos_rebuilt += 1;
+    }
+
+    report.blobs_dropped = src_blobs.len().saturating_sub(reachable_blobs.len());
+
+    for root_name in config.roots.keys() {
+        if let Some(hash) = read_root_pointer(src, root_name)? {
+            write_root_pointer(dst, root_name, &hash)?;
+        }
+    }
+
+    for event in &events {
+        let keep = if event.is_store_event() {
+            reachable_blobs.contains(&event.hash)
+        } else {
+            true
+        };
+        if !keep {
+            continue;
+        }
+        let event_hash = event.event_hash()?;
+        let dst_path = staged_event_path(dst, &event_hash);
+        if dst_path.is_file() {
+            continue;
+        }
+        if let Some(parent) = dst_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let line = event.to_json_line()?;
+        let tmp = dst_path.with_extension(format!("{STAGED_EXT}.tmp"));
+        {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+        }
+        fs::rename(&tmp, &dst_path)?;
+    }
+
+    Ok(report)
+}
+
+fn ensure_dst_empty(dst: &Path) -> Result<(), CloneError> {
+    match fs::read_dir(dst) {
+        Ok(mut iter) => {
+            if iter.next().is_some() {
+                return Err(CloneError::DstNotEmpty { path: dst.to_path_buf() });
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CloneError::Io(e)),
+    }
+}
+
+/// Enumerate every real blob under `<src>/store/` by stem — 64-hex files,
+/// extension optional. Tmp files (`.tmp-*`) and anything else is skipped.
+fn enumerate_blobs(src_kinora: &Path) -> Result<HashSet<String>, CloneError> {
+    let mut out = HashSet::new();
+    let store = store_dir(src_kinora);
+    if !store.is_dir() {
+        return Ok(out);
+    }
+    for shard in fs::read_dir(&store)? {
+        let shard = shard?;
+        if !shard.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(shard.path())? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with(".tmp-") || name.starts_with('.') {
+                continue;
+            }
+            let stem = name.split_once('.').map(|(l, _)| l).unwrap_or(name);
+            if stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+                out.insert(stem.to_owned());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn group_store_events_by_id(events: &[Event]) -> BTreeMap<String, Vec<Event>> {
+    let mut out: BTreeMap<String, Vec<Event>> = BTreeMap::new();
+    for e in events {
+        if e.is_store_event() {
+            out.entry(e.id.clone()).or_default().push(e.clone());
+        }
+    }
+    out
+}
+
+fn pick_head<'a>(id: &str, events: &'a [Event]) -> Result<&'a Event, CloneError> {
+    let referenced: HashSet<&str> = events
+        .iter()
+        .flat_map(|e| e.parents.iter().map(String::as_str))
+        .collect();
+    let heads: Vec<&Event> = events
+        .iter()
+        .filter(|e| !referenced.contains(e.hash.as_str()))
+        .collect();
+    match heads.as_slice() {
+        [only] => Ok(*only),
+        [] => Err(CloneError::NoHead { id: id.to_owned() }),
+        many => Err(CloneError::MultipleHeads {
+            id: id.to_owned(),
+            heads: many.iter().map(|e| e.hash.clone()).collect(),
+        }),
+    }
+}
+
+fn write_root_pointer(
+    kinora_root: &Path,
+    root_name: &str,
+    hash: &Hash,
+) -> Result<(), CloneError> {
+    let dir = roots_dir(kinora_root);
+    fs::create_dir_all(&dir)?;
+    let path = root_pointer_path(kinora_root, root_name);
+    let tmp = dir.join(format!(".{root_name}.tmp"));
+    fs::write(&tmp, hash.as_hex())?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::assign::{write_assign, AssignEvent};
-    use crate::commit::{commit_all, read_root_pointer, CommitParams};
-    use crate::config::Config;
-    use crate::event::Event;
-    use crate::hash::Hash;
+    use crate::commit::{commit_all, CommitParams};
     use crate::init::init;
     use crate::kino::{store_kino, StoreKinoParams};
-    use crate::kinograph::{Entry as KinographEntry, Kinograph};
-    use crate::ledger::Ledger;
-    use crate::paths::{
-        config_path, find_blob_path, kinora_root, ledger_dir, roots_dir, staged_dir, store_dir,
-    };
-    use crate::store::ContentStore;
+    use crate::kinograph::Entry as KinographEntry;
+    use crate::paths::kinora_root;
     use std::collections::BTreeMap;
-    use std::fs;
-    use std::str::FromStr;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, PathBuf) {
@@ -114,6 +368,10 @@ mod tests {
         init(tmp.path(), "https://example.com/x.git").unwrap();
         let k = kinora_root(tmp.path());
         (tmp, k)
+    }
+
+    fn empty_dst() -> TempDir {
+        TempDir::new().unwrap()
     }
 
     fn clone_params(ts: &str) -> CloneParams {
@@ -182,10 +440,10 @@ mod tests {
     #[test]
     fn clone_errors_when_src_has_no_config() {
         let src = TempDir::new().unwrap(); // just an empty dir, not a kinora dir
-        let dst_tmp = TempDir::new().unwrap();
+        let dst = empty_dst();
         let err = clone_repo(
             src.path(),
-            &dst_tmp.path().join("dst"),
+            &dst.path().join("dst"),
             clone_params("2026-04-20T09:00:00Z"),
         )
         .unwrap_err();
@@ -232,6 +490,7 @@ mod tests {
     fn clone_empty_repo_creates_missing_dst_dir() {
         let (_t, src) = setup();
         let dst_tmp = TempDir::new().unwrap();
+        // dst is a path inside dst_tmp that doesn't exist yet.
         let dst = dst_tmp.path().join("fresh_clone");
         assert!(!dst.exists());
         clone_repo(&src, &dst, clone_params("2026-04-20T09:00:00Z")).unwrap();
@@ -250,6 +509,9 @@ mod tests {
         let report = clone_repo(&src, &dst, clone_params("2026-04-20T09:00:02Z"))
             .unwrap();
 
+        // Reachable: the markdown blob, the inbox root blob, and the
+        // commits-root-related archive + commits root blob. Exact count
+        // varies with commit_all, but the markdown must be there.
         let md_hash = Hash::from_str(&md.hash).unwrap();
         assert!(
             ContentStore::new(&dst).exists(&md_hash),
@@ -271,12 +533,18 @@ mod tests {
     #[test]
     fn clone_drops_unreachable_blob() {
         let (_t, src) = setup();
+        // Reachable: one markdown, committed so it's entered in inbox.
         let reachable = store_md(&src, b"reachable", "reachable", "2026-04-20T09:00:00Z");
         commit_all(&src, commit_params("2026-04-20T09:00:01Z")).unwrap();
 
-        // Store a second kino but don't commit — its blob is present but
-        // unreachable via root pointers.
+        // Unreachable: assign to a root, then supersede with another
+        // assign targeting the same kino to a different root — neither
+        // commits this blob because we don't commit after. Actually a
+        // simpler path: just store and never commit.
         let unreachable = store_md(&src, b"orphan", "orphan", "2026-04-20T09:00:02Z");
+        // The `orphan` kino's store event is staged, but since we don't
+        // call commit_all after, it never ends up in any root. Its blob
+        // is present in the store but unreachable through root pointers.
 
         let dst_tmp = TempDir::new().unwrap();
         let dst = dst_tmp.path().join("dst");
@@ -459,6 +727,8 @@ mod tests {
         assert_eq!(before, after, "src must be byte-identical after clone");
     }
 
+    /// Recursively gather every file under `root` keyed by relative path,
+    /// so tests can assert a directory is untouched across an operation.
     fn walk_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn visit(root: &Path, cur: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
             for entry in fs::read_dir(cur).unwrap() {
