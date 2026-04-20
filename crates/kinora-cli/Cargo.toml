@@ -15,12 +15,14 @@ path = "src/main.rs"
 [dependencies]
 kinora = { path = "../kinora" }
 facet = { workspace = true }
+gix = { workspace = true }
 fastrace = { workspace = true, features = ["enable"] }
 figue = { workspace = true }
 jiff = { workspace = true }
 log = { workspace = true }
 logforth = { workspace = true, features = ["starter-log", "append-fastrace", "diagnostic-fastrace"] }
 rootcause = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

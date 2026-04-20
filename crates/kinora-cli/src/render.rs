@@ -5,13 +5,17 @@ use std::path::{Path, PathBuf};
 use kinora::cache_path::CachePath;
 use kinora::commit::read_root_pointer;
 use kinora::config::Config;
+use kinora::git_state::{
+    ExtractError, WorktreeInfo, extract_subtree, list_local_branches, list_worktrees,
+};
 use kinora::paths::{config_path, kinora_root, roots_dir};
-use kinora::render::{render, write_book};
+use kinora::render::{Book, render, write_book};
 use kinora::resolve::Resolver;
 use kinora::root::RootKinograph;
 use kinora::store::ContentStore;
+use tempfile::TempDir;
 
-use crate::common::{find_repo_root, CliError};
+use crate::common::{CliError, find_repo_root};
 
 pub struct RenderRunArgs {
     pub cache_dir: Option<String>,
@@ -22,12 +26,18 @@ pub struct RenderReport {
     pub cache_path: PathBuf,
     pub page_count: usize,
     pub skipped_count: usize,
+    /// Number of distinct branch/worktree sources that produced pages.
+    /// `0` means the render fell back to the working-copy layout — either
+    /// because the repo isn't a git repo or no branch has `.kinora/` yet.
+    pub source_count: usize,
 }
 
 pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliError> {
     let repo_root = find_repo_root(cwd)?;
     let kin_root = kinora_root(&repo_root);
 
+    // Config read from the working copy — it's the authoritative repo-url
+    // for cache-path derivation, regardless of per-branch state.
     let config_text = std::fs::read_to_string(config_path(&kin_root))?;
     let config = Config::from_styx(&config_text)?;
 
@@ -41,9 +51,16 @@ pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliEr
         }
     };
 
-    let resolver = Resolver::load(&kin_root)?;
-    let owners = build_owners_map(&kin_root)?;
-    let book = render(&resolver, &owners, "unreferenced")?;
+    // Try the git-tree-based render first; fall back to working-copy when
+    // the repo isn't a git repo or no branch carries `.kinora/` yet.
+    // `_tmps` keeps scratch dirs for blob materialization alive through
+    // the render — dropped after `write_book` returns.
+    let outcome = match render_from_git(&repo_root)? {
+        Some(o) => o,
+        None => render_from_working_copy(&kin_root)?,
+    };
+    let RenderOutcome { book, source_count, _tmps } = outcome;
+
     let page_count = book.pages.len();
     let skipped_count = book.skipped.len();
 
@@ -54,7 +71,127 @@ pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliEr
     };
     write_book(&cache_path, &title, &book)?;
 
-    Ok(RenderReport { cache_path, page_count, skipped_count })
+    Ok(RenderReport {
+        cache_path,
+        page_count,
+        skipped_count,
+        source_count,
+    })
+}
+
+/// Carries the rendered Book plus the scratch tempdirs whose contents
+/// back its kinos — the tempdirs must outlive the render so file reads
+/// resolve, but the caller only cares about the Book afterwards.
+struct RenderOutcome {
+    book: Book,
+    source_count: usize,
+    _tmps: Vec<TempDir>,
+}
+
+/// Render each local branch and linked worktree from its committed
+/// `.kinora/` tree. Returns `Ok(None)` if the repo isn't a git repo or no
+/// source has `.kinora/` — caller falls back to the working-copy render.
+fn render_from_git(repo_root: &Path) -> Result<Option<RenderOutcome>, CliError> {
+    let repo = match gix::open(repo_root) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+
+    let branches = list_local_branches(&repo)?;
+    let worktrees = list_worktrees(&repo)?;
+    let sources = combine_sources(branches, &worktrees);
+
+    let mut book = Book::default();
+    let mut tmps = Vec::new();
+    let mut source_count = 0;
+
+    for source in sources {
+        let td = TempDir::new()?;
+        match extract_subtree(&repo, source.commit, ".kinora", td.path()) {
+            Ok(()) => {}
+            // A branch existed before kinora was introduced — legitimate,
+            // just skip it rather than aborting the whole render.
+            Err(ExtractError::SubtreeAbsent { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        }
+
+        let resolver = Resolver::load(td.path())?;
+        // Every page renders under `source.label` (branch or worktree
+        // name). Root-level grouping ("main"/"unreferenced") is dropped
+        // for the git path: branches *are* the top-level grouping now.
+        let per_source = render(&resolver, &HashMap::new(), &source.label)?;
+        book.pages.extend(per_source.pages);
+        book.skipped.extend(per_source.skipped);
+        source_count += 1;
+        tmps.push(td);
+    }
+
+    if source_count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(RenderOutcome {
+        book,
+        source_count,
+        _tmps: tmps,
+    }))
+}
+
+/// Fallback: read `.kinora/` from the working directory with the legacy
+/// root-based grouping. Used when git isn't available or no branch has
+/// `.kinora/` committed yet (e.g. a freshly-initialized repo).
+fn render_from_working_copy(kin_root: &Path) -> Result<RenderOutcome, CliError> {
+    let resolver = Resolver::load(kin_root)?;
+    let owners = build_owners_map(kin_root)?;
+    let book = render(&resolver, &owners, "unreferenced")?;
+    Ok(RenderOutcome {
+        book,
+        source_count: 0,
+        _tmps: Vec::new(),
+    })
+}
+
+/// Merge branches + worktrees into one ordered source list, deduping
+/// worktrees whose ref is already represented by a local branch. Branches
+/// take precedence (they're named simply after the branch; worktree labels
+/// can include transient worktree ids).
+struct RenderSource {
+    label: String,
+    commit: gix::ObjectId,
+}
+
+fn combine_sources(
+    branches: Vec<(String, gix::ObjectId)>,
+    worktrees: &[WorktreeInfo],
+) -> Vec<RenderSource> {
+    let mut seen_refs: std::collections::BTreeSet<String> = branches
+        .iter()
+        .map(|(n, _)| format!("refs/heads/{n}"))
+        .collect();
+    let mut sources: Vec<RenderSource> = branches
+        .into_iter()
+        .map(|(label, commit)| RenderSource { label, commit })
+        .collect();
+    for wt in worktrees {
+        match &wt.ref_name {
+            Some(r) if seen_refs.contains(r) => continue,
+            Some(r) => {
+                seen_refs.insert(r.clone());
+                sources.push(RenderSource {
+                    label: format!("worktree-{}", wt.label),
+                    commit: wt.head_commit,
+                });
+            }
+            None => {
+                sources.push(RenderSource {
+                    label: format!("worktree-{}", wt.label),
+                    commit: wt.head_commit,
+                });
+            }
+        }
+    }
+    // Sort for deterministic output across runs.
+    sources.sort_by(|a, b| a.label.cmp(&b.label));
+    sources
 }
 
 /// Pure resolver so the XDG/HOME branching can be unit-tested without
@@ -134,10 +271,11 @@ fn build_owners_map(kin_root: &Path) -> Result<HashMap<String, String>, CliError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kinora::commit::{commit_root, CommitParams};
+    use kinora::commit::{CommitParams, commit_root};
     use kinora::init::init;
-    use kinora::kino::{store_kino, StoreKinoParams};
+    use kinora::kino::{StoreKinoParams, store_kino};
     use std::collections::BTreeMap;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn repo() -> TempDir {
@@ -193,6 +331,10 @@ mod tests {
         .unwrap();
     }
 
+    // ------------------------------------------------------------------
+    // run_render: single-source (non-git) fallback paths
+    // ------------------------------------------------------------------
+
     #[test]
     fn render_writes_pages_under_override_cache_dir() {
         let tmp = repo();
@@ -206,6 +348,7 @@ mod tests {
         let report = run_render(tmp.path(), args).unwrap();
         assert_eq!(report.cache_path, cache.path());
         assert_eq!(report.page_count, 1);
+        assert_eq!(report.source_count, 0, "non-git repo should fall back");
         assert!(cache.path().join("book.toml").is_file());
         assert!(cache.path().join("src/SUMMARY.md").is_file());
     }
@@ -357,7 +500,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // End-to-end render grouping
+    // End-to-end render grouping — fallback (non-git) path
     // ------------------------------------------------------------------
 
     #[test]
@@ -420,5 +563,219 @@ mod tests {
         assert_eq!(report.page_count, 3);
         assert!(cache.path().join("src/main/index.md").is_file());
         assert!(cache.path().join("src/unreferenced/index.md").is_file());
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-branch end-to-end (git path)
+    // ------------------------------------------------------------------
+
+    fn git(args: &[&str], cwd: &Path) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env("HOME", cwd)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    fn git_init(path: &Path) {
+        git(&["init", "-b", "main"], path);
+        git(&["config", "user.name", "test"], path);
+        git(&["config", "user.email", "test@example.com"], path);
+    }
+
+    #[test]
+    fn multi_branch_render_produces_one_section_per_branch() {
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        // main branch: kino "alpha"
+        store_kino(&kin, params(b"# alpha\n", "alpha")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "seed main"], tmp.path());
+
+        // feature-x branch: kino "beta" (alpha is still present because it
+        // was committed before branching)
+        git(&["checkout", "-b", "feature-x"], tmp.path());
+        store_kino(&kin, params(b"# beta\n", "beta")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "add beta on feature-x"], tmp.path());
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        assert_eq!(report.source_count, 2, "two branches: main + feature-x");
+
+        let summary =
+            std::fs::read_to_string(cache.path().join("src/SUMMARY.md")).unwrap();
+        assert!(summary.contains("[main]"), "summary missing main: {summary}");
+        assert!(
+            summary.contains("[feature-x]"),
+            "summary missing feature-x: {summary}"
+        );
+
+        // A kino that exists only on feature-x appears only under feature-x.
+        assert!(cache.path().join("src/feature-x").is_dir());
+        assert!(cache.path().join("src/main").is_dir());
+
+        // The alpha kino — committed on main before branching — should be
+        // present on BOTH branches (one page per (branch, kino) pair).
+        let feature_x_files: Vec<String> =
+            std::fs::read_dir(cache.path().join("src/feature-x"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                .collect();
+        assert!(
+            feature_x_files.iter().any(|n| n.starts_with("alpha-")),
+            "alpha missing on feature-x: {feature_x_files:?}",
+        );
+        assert!(
+            feature_x_files.iter().any(|n| n.starts_with("beta-")),
+            "beta missing on feature-x: {feature_x_files:?}",
+        );
+
+        let main_files: Vec<String> = std::fs::read_dir(cache.path().join("src/main"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
+        assert!(
+            main_files.iter().any(|n| n.starts_with("alpha-")),
+            "alpha missing on main: {main_files:?}",
+        );
+        assert!(
+            !main_files.iter().any(|n| n.starts_with("beta-")),
+            "beta must not appear on main: {main_files:?}",
+        );
+    }
+
+    #[test]
+    fn source_marker_cites_originating_branch() {
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        store_kino(&kin, params(b"# hello\n", "greet")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "seed"], tmp.path());
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        run_render(tmp.path(), args).unwrap();
+
+        // Find the single page and read it.
+        let main_dir = cache.path().join("src/main");
+        let entries: Vec<PathBuf> = std::fs::read_dir(&main_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+            .filter(|p| p.file_stem().and_then(|s| s.to_str()) != Some("index"))
+            .collect();
+        assert_eq!(entries.len(), 1, "expected 1 page on main, got {entries:?}");
+        let body = std::fs::read_to_string(&entries[0]).unwrap();
+        assert!(
+            body.contains("Rendered from `main`"),
+            "source marker missing/wrong: {body}"
+        );
+    }
+
+    #[test]
+    fn render_falls_back_when_git_has_no_kinora() {
+        // Git repo exists but `.kinora/` is only in the working dir (never
+        // committed). The render should fall back to the working-copy path
+        // so users pre-first-commit still see their kinos.
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        // Make a commit that doesn't include .kinora/
+        std::fs::write(tmp.path().join("README.md"), b"# readme\n").unwrap();
+        git(&["add", "README.md"], tmp.path());
+        git(&["commit", "-m", "readme only"], tmp.path());
+
+        store_kino(&kin, params(b"# hello\n", "greet")).unwrap();
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        assert_eq!(report.page_count, 1);
+        assert_eq!(
+            report.source_count, 0,
+            "no branch has .kinora/, expected fallback"
+        );
+        assert!(cache.path().join("src/unreferenced").is_dir());
+    }
+
+    #[test]
+    fn worktree_surfaces_as_its_own_group_when_branch_differs() {
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        store_kino(&kin, params(b"# alpha\n", "alpha")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "seed"], tmp.path());
+
+        // Create a linked worktree on a new branch. The branch is fully
+        // enumerated through the normal refs/heads path — the worktree is
+        // just a view onto it — so the render should dedupe and NOT
+        // produce a separate "worktree-*" section.
+        let wt_parent = TempDir::new().unwrap();
+        let wt_path = wt_parent.path().join("extra");
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-branch",
+                wt_path.to_str().unwrap(),
+            ],
+            tmp.path(),
+        );
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        // Two branches (main, wt-branch), one linked worktree deduped
+        // against wt-branch → two sources.
+        assert_eq!(report.source_count, 2, "got {report:?}");
+        assert!(cache.path().join("src/main").is_dir());
+        assert!(cache.path().join("src/wt-branch").is_dir());
+        let files: Vec<String> = std::fs::read_dir(cache.path().join("src"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !files.iter().any(|f| f.starts_with("worktree-")),
+            "worktree should dedupe against refs/heads/wt-branch: {files:?}",
+        );
     }
 }

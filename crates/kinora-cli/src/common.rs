@@ -5,6 +5,7 @@ use kinora::assign::AssignError;
 use kinora::clone::CloneError;
 use kinora::commit::CommitError;
 use kinora::config::ConfigError;
+use kinora::git_state::{EnumError, ExtractError};
 use kinora::kino::StoreKinoError;
 use kinora::kinograph::KinographError;
 use kinora::ledger::LedgerError;
@@ -60,6 +61,10 @@ pub enum CliError {
     Clone(#[from] CloneError),
     #[error(transparent)]
     Repack(#[from] RepackError),
+    #[error(transparent)]
+    Extract(#[from] ExtractError),
+    #[error(transparent)]
+    GitEnum(#[from] EnumError),
 }
 
 /// Walk up from `start` looking for a directory that contains `.kinora/`.

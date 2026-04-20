@@ -1913,6 +1913,7 @@ dependencies = [
  "facet",
  "fastrace",
  "figue",
+ "gix",
  "jiff",
  "kinora",
  "log",

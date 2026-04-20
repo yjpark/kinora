@@ -173,10 +173,16 @@ fn run() -> ExitCode {
                     } else {
                         format!(" (skipped {} forked)", report.skipped_count)
                     };
+                    let source_note = match report.source_count {
+                        0 => " from working copy".to_owned(),
+                        1 => " from 1 branch/worktree".to_owned(),
+                        n => format!(" from {n} branches/worktrees"),
+                    };
                     println!(
-                        "rendered {} pages{} into {}",
+                        "rendered {} pages{}{} into {}",
                         report.page_count,
                         skipped_note,
+                        source_note,
                         report.cache_path.display(),
                     );
                     ExitCode::SUCCESS
