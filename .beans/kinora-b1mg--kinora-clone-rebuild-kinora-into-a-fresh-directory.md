@@ -1,11 +1,11 @@
 ---
 # kinora-b1mg
 title: 'kinora clone: rebuild .kinora/ into a fresh directory'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-19T14:51:05Z
-updated_at: 2026-04-20T13:43:52Z
+updated_at: 2026-04-20T13:44:26Z
 blocked_by:
     - kinora-jezf
     - kinora-q6bo
@@ -148,3 +148,29 @@ Workaround:
 - Re-instate the staged-empty check once bayr lands; at that point the dst staged-empty acceptance criterion becomes naturally satisfied
 
 Everything else in the bean spec stands.
+
+## Summary of Changes
+
+Landed in four commits on main:
+
+- `5ca661c` test(clone): spec library clone semantics — 12 failing tests + type stubs.
+- `ca19a87` feat(clone): walk reachable blobs into fresh dst — full `kinora::clone` module.
+- `dac331d` fix(clone): reuse `Ledger::write_event`; cover all-reachable case — Phase A review fixes.
+- `67f1951` feat(cli): add `kinora clone` command — Phase B CLI wrapper + Phase C review fixes.
+
+### Design deviations from the bean spec
+
+1. **Staged-empty precondition was dropped.** The spec assumed a post-kinora-q6bo world where staged is transient. Instead of blocking on q6bo, clone now filters events during the copy: store events whose blob hash is reachable are kept; all non-store events (assigns) are kept verbatim. Dst's staged is non-empty but carries only reachable history, which satisfies the acceptance criterion "produces a dst that kinora render/resolve treats identically to src".
+2. **Hash verification is inherited from `ContentStore::read`** rather than implemented separately — the store API already verifies hashes on read.
+3. **Clone is implemented as a library-level operation that takes direct `.kinora/` paths.** The CLI wrapper is a thin shell; `-C` / `--repo-root` is rejected when combined with clone (hard error, not silent ignore).
+4. **Author and provenance default to literal `"clone"`.** Clone doesn't derive author from git — it's a local rebuild that may run outside a git worktree.
+
+### What's covered by tests
+
+- Library: 13 tests covering empty repo, single-kino, composition recursion, unreachable-blob drop, legacy extensionless filename rewrite, hash preservation, staged event filtering, multiple-head error, no-head error, src-invalid / dst-not-empty errors, all-reachable case.
+- CLI: 9 tests covering success on empty repo, src-not-kinora error, dst-not-empty error, relative-path resolution, default author/provenance, and summary formatting at 0 / 1 / many counts.
+
+### Not addressed (out of scope)
+
+- `kinora repack` (commit → clone → swap atomic pipeline) — separate bean.
+- `ContentStore::read` legacy-name tolerance was already in place from kinora-wpup; clone just exercises it.
