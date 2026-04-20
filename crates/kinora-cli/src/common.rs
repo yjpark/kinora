@@ -10,6 +10,7 @@ use kinora::kinograph::KinographError;
 use kinora::ledger::LedgerError;
 use kinora::paths::KINORA_DIR;
 use kinora::reformat::ReformatError;
+use kinora::repack::RepackError;
 use kinora::render::RenderError;
 use kinora::resolve::ResolveError;
 use kinora::root::RootError;
@@ -57,6 +58,8 @@ pub enum CliError {
     Reformat(#[from] ReformatError),
     #[error(transparent)]
     Clone(#[from] CloneError),
+    #[error(transparent)]
+    Repack(#[from] RepackError),
 }
 
 /// Walk up from `start` looking for a directory that contains `.kinora/`.

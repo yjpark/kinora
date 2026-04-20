@@ -13,6 +13,7 @@ use logforth::filter::env_filter::EnvFilterBuilder;
 use logforth::record::LevelFilter;
 use reformat::{format_reformat_summary, run_reformat, ReformatRunArgs};
 use render::{run_render, RenderRunArgs};
+use repack::{format_repack_summary, run_repack, RepackRunArgs};
 use resolve::{
     head_lineages, render_all_heads, render_fork_report, run_resolve, ResolveOutcome,
     ResolveRunArgs,
@@ -27,6 +28,7 @@ mod common;
 mod commit;
 mod reformat;
 mod render;
+mod repack;
 mod resolve;
 mod store;
 
@@ -207,6 +209,16 @@ fn run() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => report_err("reformat", e),
+            }
+        }
+        Command::Repack { author, provenance } => {
+            let args = RepackRunArgs { author, provenance };
+            match run_repack(&cwd, args) {
+                Ok(report) => {
+                    println!("{}", format_repack_summary(&report));
+                    ExitCode::SUCCESS
+                }
+                Err(e) => report_err("repack", e),
             }
         }
         Command::Resolve { name_or_id, version, all_heads } => {

@@ -156,6 +156,23 @@ pub enum Command {
         provenance: Option<String>,
     },
 
+    /// Commit every declared root, clone the `.kinora/` directory into a
+    /// sibling `.kinora.repack-tmp/`, then atomically swap the two dirs
+    /// and delete the old copy. Drops unreachable blobs and rewrites
+    /// legacy extensionless filenames into the canonical form. Refuses
+    /// to run when a prior `.kinora.repack-tmp` or `.kinora.repack-old`
+    /// directory lingers — that state means a previous repack crashed
+    /// and needs manual attention.
+    Repack {
+        /// Override author (defaults to `user.name` from git config).
+        #[facet(args::named, default)]
+        author: Option<String>,
+
+        /// Provenance of this repack run. Defaults to `repack`.
+        #[facet(args::named, default)]
+        provenance: Option<String>,
+    },
+
     /// Rebuild a `.kinora/` directory into a fresh target. Copies only
     /// reachable blobs from `<src>` into `<dst>` through the current store
     /// API, rewriting legacy extensionless filenames into the canonical

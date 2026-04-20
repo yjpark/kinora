@@ -144,9 +144,10 @@ pub fn repack_repo(
         }
     }
 
-    // Remove the old dir (best-effort — on failure we leak but don't
-    // corrupt; the next repack preflight will complain which is
-    // actionable).
+    // Remove the old dir. The swap already succeeded, so the repo is in
+    // its final rebuilt state — but a lingering `.repack-old` would block
+    // the next repack's preflight, so surface the error rather than
+    // swallowing it.
     fs::remove_dir_all(&old_dir)?;
 
     Ok(RepackReport { commits, clone: clone_report })
