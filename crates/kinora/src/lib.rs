@@ -15,6 +15,7 @@ pub mod namespace;
 pub mod paths;
 pub mod reformat;
 pub mod render;
+pub mod repack;
 pub mod resolve;
 pub mod root;
 pub mod store;
