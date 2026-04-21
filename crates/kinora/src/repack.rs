@@ -322,6 +322,42 @@ mod tests {
     }
 
     #[test]
+    fn repack_leaves_no_staged_events_on_fresh_repo() {
+        use crate::paths::staged_dir;
+
+        let (_tmp, repo) = setup();
+        let kin = kinora_root(&repo);
+        store_kino(&kin, store_params("2026-04-20T01:00:00Z")).unwrap();
+
+        repack_repo(&repo, repack_params("2026-04-20T02:00:00Z")).unwrap();
+
+        let staged = staged_dir(&kinora_root(&repo));
+        let leftover: Vec<PathBuf> = walk_staged_events(&staged);
+        assert!(
+            leftover.is_empty(),
+            "staged/ should hold no events after commit+repack; found {leftover:?}",
+        );
+    }
+
+    fn walk_staged_events(staged: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(shards) = fs::read_dir(staged) else {
+            return out;
+        };
+        for shard in shards.flatten() {
+            if !shard.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path()).into_iter().flatten().flatten() {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                    out.push(entry.path());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
     fn repack_drains_orphan_archived_events_left_behind() {
         use crate::ledger::Ledger;
         use crate::paths::staged_event_path;
