@@ -908,7 +908,7 @@ mod tests {
             "",
         );
         // Two root kinographs that each list the same entry.
-        let kg = crate::root::RootKinograph { entries: vec![entry] };
+        let kg = crate::root::RootKinograph::with_entries(vec![entry]);
         let kg_bytes = kg.to_styxl().unwrap().into_bytes();
         let kg_hash = store.write("root", &kg_bytes).unwrap();
 

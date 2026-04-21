@@ -466,7 +466,7 @@ pub fn build_root(
         entries.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
-    Ok(RootKinograph { entries })
+    Ok(RootKinograph::with_entries(entries))
 }
 
 /// Collect the live assign set from the staged event stream.
@@ -669,89 +669,52 @@ fn commit_root_with_refs(
         refs,
     )?;
 
-    let new_bytes = root.to_styxl()?.into_bytes();
+    // Stamp the commit metadata (ts/author/provenance, parents, lineage
+    // id) into the root header. Genesis derives id from the entries-only
+    // payload; subsequent versions carry the prior lineage id forward and
+    // record the prior blob hash as the parent.
+    let fresh_entries = std::mem::take(&mut root.entries);
+    let root = match (prior_root.as_ref(), prior_version.as_ref()) {
+        (Some(prior), Some(prior_hash)) => RootKinograph::new_child(
+            prior.header.id.clone(),
+            vec![prior_hash.as_hex().to_owned()],
+            fresh_entries,
+            params.ts.clone(),
+            params.author.clone(),
+            params.provenance.clone(),
+        ),
+        _ => RootKinograph::new_genesis(
+            fresh_entries,
+            params.ts.clone(),
+            params.author.clone(),
+            params.provenance.clone(),
+        )?,
+    };
 
-    let result = match &prior_version {
-        Some(prior) => {
-            let prior_bytes = ContentStore::new(kinora_root).read(prior)?;
-            if prior_bytes == new_bytes {
-                CommitResult {
-                    root_name: root_name.to_owned(),
-                    new_version: None,
-                    prior_version: prior_version.clone(),
-                    retained_by_cross_root: retained_by_cross_root.clone(),
-                }
-            } else {
-                let prior_event = events
-                    .iter()
-                    .find(|e| e.hash == prior.as_hex())
-                    .ok_or_else(|| CommitError::PriorEventMissing {
-                        version: prior.as_hex().to_owned(),
-                    })?;
-                let stored = store_kino(
-                    kinora_root,
-                    StoreKinoParams {
-                        kind: "root".into(),
-                        content: new_bytes,
-                        author: params.author.clone(),
-                        provenance: params.provenance.clone(),
-                        ts: params.ts.clone(),
-                        metadata: BTreeMap::new(),
-                        id: Some(prior_event.id.clone()),
-                        parents: vec![prior.as_hex().to_owned()],
-                    },
-                )?;
-                let new_hash = Hash::from_str(&stored.event.hash).map_err(|err| {
-                    CommitError::InvalidHash {
-                        value: stored.event.hash.clone(),
-                        err,
-                    }
-                })?;
-                write_root_pointer(kinora_root, root_name, &new_hash)?;
-                CommitResult {
-                    root_name: root_name.to_owned(),
-                    new_version: Some(new_hash),
-                    prior_version: prior_version.clone(),
-                    retained_by_cross_root: retained_by_cross_root.clone(),
-                }
-            }
+    // No-op detection: compare entries, not bytes. The header carries ts
+    // which changes every commit, so byte-identity would never match
+    // across two clean runs.
+    let entries_unchanged = match prior_root.as_ref() {
+        Some(p) => p.entries == root.entries,
+        None => root.entries.is_empty(),
+    };
+
+    let result = if entries_unchanged {
+        CommitResult {
+            root_name: root_name.to_owned(),
+            new_version: None,
+            prior_version: prior_version.clone(),
+            retained_by_cross_root: retained_by_cross_root.clone(),
         }
-        None => {
-            if root.entries.is_empty() {
-                CommitResult {
-                    root_name: root_name.to_owned(),
-                    new_version: None,
-                    prior_version: None,
-                    retained_by_cross_root: retained_by_cross_root.clone(),
-                }
-            } else {
-                let stored = store_kino(
-                    kinora_root,
-                    StoreKinoParams {
-                        kind: "root".into(),
-                        content: new_bytes,
-                        author: params.author.clone(),
-                        provenance: params.provenance.clone(),
-                        ts: params.ts.clone(),
-                        metadata: BTreeMap::new(),
-                        id: None,
-                        parents: vec![],
-                    },
-                )?;
-                let new_hash = Hash::from_str(&stored.event.hash).map_err(|err| {
-                    CommitError::InvalidHash {
-                        value: stored.event.hash.clone(),
-                        err,
-                    }
-                })?;
-                write_root_pointer(kinora_root, root_name, &new_hash)?;
-                CommitResult {
-                    root_name: root_name.to_owned(),
-                    new_version: Some(new_hash),
-                    prior_version: None,
-                    retained_by_cross_root: retained_by_cross_root.clone(),
-                }
-            }
+    } else {
+        let new_bytes = root.to_styxl()?.into_bytes();
+        let new_hash = ContentStore::new(kinora_root).write("root", &new_bytes)?;
+        write_root_pointer(kinora_root, root_name, &new_hash)?;
+        CommitResult {
+            root_name: root_name.to_owned(),
+            new_version: Some(new_hash),
+            prior_version: prior_version.clone(),
+            retained_by_cross_root: retained_by_cross_root.clone(),
         }
     };
 
@@ -1384,11 +1347,13 @@ mod tests {
         let hash = result.new_version.expect("new version on genesis");
         assert!(result.prior_version.is_none());
 
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let root_event = events.iter().find(|e| e.kind == "root").unwrap();
-        assert_eq!(root_event.hash, hash.as_hex());
-        assert!(root_event.parents.is_empty(), "genesis has empty parents");
-        assert_eq!(root_event.id, root_event.hash, "genesis id == hash");
+        // Genesis commit metadata lives on the root blob's header, not in
+        // the staged ledger. Parse the blob and assert on it.
+        let blob = ContentStore::new(&root).read(&hash).unwrap();
+        let rk = RootKinograph::parse(&blob).unwrap();
+        assert!(rk.header.parents.is_empty(), "genesis has empty parents");
+        let expected_id = RootKinograph::genesis_id(&rk.entries).unwrap();
+        assert_eq!(rk.header.id, expected_id, "genesis id = hash(entries-only bytes)");
     }
 
     #[test]
@@ -1409,18 +1374,16 @@ mod tests {
         let new = second.new_version.expect("new version after update");
         assert_ne!(new, prior, "version hash should differ after bump");
 
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let new_root_event = events
-            .iter()
-            .find(|e| e.kind == "root" && e.hash == new.as_hex())
-            .unwrap();
-        assert_eq!(new_root_event.parents, vec![prior.as_hex().to_owned()]);
-        // Identity carried forward from the genesis root.
-        let genesis_event = events
-            .iter()
-            .find(|e| e.kind == "root" && e.hash == prior.as_hex())
-            .unwrap();
-        assert_eq!(new_root_event.id, genesis_event.id);
+        // Lineage + parent chain live on the root blob's header now, not
+        // on staged events.
+        let store = ContentStore::new(&root);
+        let new_rk = RootKinograph::parse(&store.read(&new).unwrap()).unwrap();
+        let prior_rk = RootKinograph::parse(&store.read(&prior).unwrap()).unwrap();
+        assert_eq!(new_rk.header.parents, vec![prior.as_hex().to_owned()]);
+        assert_eq!(
+            new_rk.header.id, prior_rk.header.id,
+            "lineage id carries forward from genesis",
+        );
     }
 
     #[test]
@@ -1489,10 +1452,12 @@ mod tests {
     }
 
     #[test]
-    fn two_independent_commits_produce_byte_identical_root_blobs() {
+    fn two_independent_commits_produce_identical_lineage_id_and_entries() {
         // Run the same logical commit in two fresh repos with different
-        // commit author/ts/provenance — the root blob (content bytes) must
-        // be byte-identical because it's derived purely from the user events.
+        // commit author/ts/provenance. The full blob bytes now differ
+        // (the header captures the commit metadata), but the entries
+        // payload must match byte-for-byte and so the derived lineage id
+        // (hash-of-entries-only) must match too.
         let mk = |root: &Path| {
             store_md(root, b"alpha", "a", "2026-04-19T10:00:00Z");
             store_md(root, b"beta", "b", "2026-04-19T10:00:01Z");
@@ -1524,8 +1489,13 @@ mod tests {
 
         let blob1 = ContentStore::new(&root1).read(&r1).unwrap();
         let blob2 = ContentStore::new(&root2).read(&r2).unwrap();
-        assert_eq!(blob1, blob2, "root blob content must match byte-for-byte");
-        assert_eq!(r1, r2, "therefore the content hashes match too");
+        let rk1 = RootKinograph::parse(&blob1).unwrap();
+        let rk2 = RootKinograph::parse(&blob2).unwrap();
+        assert_eq!(rk1.entries, rk2.entries, "entries must match verbatim");
+        assert_eq!(
+            rk1.header.id, rk2.header.id,
+            "lineage id (hash-of-entries) must match",
+        );
     }
 
     #[test]
@@ -2218,34 +2188,24 @@ roots {
     ) -> Hash {
         let prior = read_root_pointer(kin, root_name).unwrap().expect("need prior root");
         let prior_bytes = ContentStore::new(kin).read(&prior).unwrap();
-        let mut rk = RootKinograph::parse(&prior_bytes).unwrap();
-        for e in rk.entries.iter_mut() {
+        let prior_rk = RootKinograph::parse(&prior_bytes).unwrap();
+        let mut entries = prior_rk.entries.clone();
+        for e in entries.iter_mut() {
             if e.id == kino_id {
                 e.pin = true;
                 e.version = pinned_version.to_owned();
             }
         }
-        let bytes = rk.to_styx().unwrap().into_bytes();
-        let events = Ledger::new(kin).read_all_events().unwrap();
-        let prior_root_event = events
-            .iter()
-            .find(|e| e.hash == prior.as_hex())
-            .expect("prior root event present");
-        let stored = store_kino(
-            kin,
-            StoreKinoParams {
-                kind: "root".into(),
-                content: bytes,
-                author: "pin-hack".into(),
-                provenance: "test-pin".into(),
-                ts: now.into(),
-                metadata: BTreeMap::new(),
-                id: Some(prior_root_event.id.clone()),
-                parents: vec![prior.as_hex().to_owned()],
-            },
-        )
-        .unwrap();
-        let new_hash = Hash::from_str(&stored.event.hash).unwrap();
+        let rk = RootKinograph::new_child(
+            prior_rk.header.id.clone(),
+            vec![prior.as_hex().to_owned()],
+            entries,
+            now.to_owned(),
+            "pin-hack".into(),
+            "test-pin".into(),
+        );
+        let bytes = rk.to_styxl().unwrap().into_bytes();
+        let new_hash = ContentStore::new(kin).write("root", &bytes).unwrap();
         write_root_pointer(kin, root_name, &new_hash).unwrap();
         new_hash
     }
@@ -3436,7 +3396,7 @@ roots {
             pin: true,
             head_ts: String::new(),
         };
-        let prior = RootKinograph { entries: vec![pinned.clone()] };
+        let prior = RootKinograph::with_entries(vec![pinned.clone()]);
         let built = build_root(&[], "main", &declared, Some(&prior)).unwrap();
         assert_eq!(built.entries, vec![pinned]);
     }
@@ -3449,15 +3409,13 @@ roots {
         let declared: BTreeSet<String> =
             BTreeSet::from(["main".to_owned(), "other".to_owned()]);
         let x_id = "a".repeat(64);
-        let prior = RootKinograph {
-            entries: vec![RootEntry::new(
-                x_id.clone(),
-                "b".repeat(64),
-                "markdown",
-                BTreeMap::new(),
-                "",
-            )],
-        };
+        let prior = RootKinograph::with_entries(vec![RootEntry::new(
+            x_id.clone(),
+            "b".repeat(64),
+            "markdown",
+            BTreeMap::new(),
+            "",
+        )]);
         let reassign = AssignEvent {
             kino_id: x_id.clone(),
             target_root: "other".into(),
@@ -3496,15 +3454,13 @@ roots {
         );
         let declared_with_inbox: BTreeSet<String> =
             BTreeSet::from(["inbox".to_owned()]);
-        let prior = RootKinograph {
-            entries: vec![RootEntry::new(
-                store.id.clone(),
-                "stale-version",
-                "markdown",
-                BTreeMap::new(),
-                "",
-            )],
-        };
+        let prior = RootKinograph::with_entries(vec![RootEntry::new(
+            store.id.clone(),
+            "stale-version",
+            "markdown",
+            BTreeMap::new(),
+            "",
+        )]);
         let built = build_root(
             std::slice::from_ref(&store),
             "inbox",
@@ -3559,7 +3515,7 @@ roots {
             pin: false,
             head_ts: "2026-04-05T10:00:00Z".into(), // 14 days older than `now`
         };
-        let mut kg = RootKinograph { entries: vec![entry] };
+        let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
         let implicit: BTreeSet<(String, String)> = BTreeSet::new();
         let refs = ExternalRefs::default();
@@ -3597,7 +3553,7 @@ roots {
             pin: false,
             head_ts: String::new(),
         };
-        let mut kg = RootKinograph { entries: vec![entry] };
+        let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
         let implicit: BTreeSet<(String, String)> = BTreeSet::new();
         let refs = ExternalRefs::default();
@@ -3633,7 +3589,7 @@ roots {
             pin: false,
             head_ts: "not-a-timestamp".into(),
         };
-        let mut kg = RootKinograph { entries: vec![entry] };
+        let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
         let implicit: BTreeSet<(String, String)> = BTreeSet::new();
         let refs = ExternalRefs::default();
@@ -3800,28 +3756,24 @@ roots {
         let id = "a".repeat(64);
         let prior_version = "b".repeat(64);
         let fresh_version = "c".repeat(64);
-        let prior = RootKinograph {
-            entries: vec![RootEntry {
-                id: id.clone(),
-                version: prior_version.clone(),
-                kind: "markdown".into(),
-                metadata: BTreeMap::new(),
-                note: String::new(),
-                pin: true,
-                head_ts: "2026-04-01T00:00:00Z".into(),
-            }],
-        };
-        let mut fresh = RootKinograph {
-            entries: vec![RootEntry {
-                id: id.clone(),
-                version: fresh_version.clone(),
-                kind: "markdown".into(),
-                metadata: BTreeMap::new(),
-                note: String::new(),
-                pin: false,
-                head_ts: "2026-04-10T00:00:00Z".into(),
-            }],
-        };
+        let prior = RootKinograph::with_entries(vec![RootEntry {
+            id: id.clone(),
+            version: prior_version.clone(),
+            kind: "markdown".into(),
+            metadata: BTreeMap::new(),
+            note: String::new(),
+            pin: true,
+            head_ts: "2026-04-01T00:00:00Z".into(),
+        }]);
+        let mut fresh = RootKinograph::with_entries(vec![RootEntry {
+            id: id.clone(),
+            version: fresh_version.clone(),
+            kind: "markdown".into(),
+            metadata: BTreeMap::new(),
+            note: String::new(),
+            pin: false,
+            head_ts: "2026-04-10T00:00:00Z".into(),
+        }]);
 
         propagate_pins(&mut fresh, Some(&prior));
 

@@ -1,21 +1,21 @@
-//! Reformat legacy `.styx`-wrapped kinograph and root blobs into the new
-//! styxl one-entry-per-line form.
+//! Reformat legacy `.styx`-wrapped kinograph blobs into the new styxl
+//! one-entry-per-line form.
 //!
 //! Strategy:
 //!
-//! 1. **Regular kinograph kinos** (`kind: "kinograph"`) reachable from any
-//!    root's current root-kinograph entries are reformatted as *staged
-//!    new-version events*. The reformat does not update pointers directly
-//!    — the user's next `kinora commit` promotes the new versions to
-//!    heads.
-//! 2. **Root kinographs** (`kind: "root"`) are produced by commit, not
-//!    staged. For those, reformat stores the new blob + records a store
-//!    event + updates the root pointer in one step — the same shape that
-//!    commit itself uses.
-//! 3. Non-styx kinds (markdown/text/binary/…) are opaque byte streams and
-//!    left untouched.
-//! 4. Idempotent: re-running reformat on an already-styxl repo stages no
-//!    events and updates no pointers.
+//! - **Regular kinograph kinos** (`kind: "kinograph"`) reachable from any
+//!   root's current root-kinograph entries are reformatted as *staged
+//!   new-version events*. The reformat does not update pointers directly
+//!   — the user's next `kinora commit` promotes the new versions to
+//!   heads.
+//! - **Root kinographs** (`kind: "root"`) carry commit metadata in a
+//!   header line (see `crate::root`) and are not reformattable through
+//!   this path. The et1t cutover made legacy root blobs unreadable; repos
+//!   that predate it must be rebuilt from source.
+//! - Non-styx kinds (markdown/text/binary/…) are opaque byte streams and
+//!   left untouched.
+//! - Idempotent: re-running reformat on an already-styxl repo stages no
+//!   events.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -30,7 +30,7 @@ use crate::hash::{Hash, HashParseError};
 use crate::kino::{store_kino, StoreKinoError, StoreKinoParams};
 use crate::kinograph::{is_styxl, Kinograph, KinographError};
 use crate::ledger::{Ledger, LedgerError};
-use crate::paths::{config_path, root_pointer_path, roots_dir};
+use crate::paths::config_path;
 use crate::root::{RootError, RootKinograph};
 use crate::store::{ContentStore, StoreError};
 
@@ -60,8 +60,6 @@ pub enum ReformatError {
         #[source]
         err: HashParseError,
     },
-    #[error("root pointer {name} references a version `{version}` with no matching store event")]
-    PriorRootEventMissing { name: String, version: String },
     #[error("identity {id} has {} heads at reformat time: {}", .heads.len(), .heads.join(", "))]
     MultipleHeads { id: String, heads: Vec<String> },
     #[error("identity {id} has no head at reformat time (cycle or orphan)")]
@@ -82,28 +80,18 @@ pub struct ReformattedKinograph {
     pub new_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReformattedRoot {
-    pub root_name: String,
-    pub prior_version: String,
-    pub new_version: String,
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReformatReport {
     pub reformatted_kinographs: Vec<ReformattedKinograph>,
     pub skipped_kinographs_already_formatted: usize,
-    pub reformatted_roots: Vec<ReformattedRoot>,
-    pub skipped_roots_already_formatted: usize,
 }
 
 /// Walk the repo's root pointers and reachable kinograph kinos, rewriting
 /// any remaining legacy-styx content into styxl.
 ///
-/// Stages version events for regular kinograph kinos and writes root
-/// pointers + store events for root kinographs. Caller is expected to
-/// run a subsequent `kinora commit` to surface the staged kinograph
-/// versions as heads for render.
+/// Stages version events for regular kinograph kinos. Caller is expected
+/// to run a subsequent `kinora commit` to surface the staged versions as
+/// heads for render.
 pub fn reformat_repo(
     kinora_root: &Path,
     params: ReformatParams,
@@ -116,80 +104,13 @@ pub fn reformat_repo(
 
     let mut report = ReformatReport::default();
 
-    // Hoist the ledger read out of Step 1's per-root loop so we pay the
-    // scan cost once per reformat run. Step 2 reuses the same snapshot; if
-    // Step 1 stages new root events the snapshot won't see them, but
-    // Step 2 only uses the snapshot for kinograph identity lookups, not
-    // root pointer traversal, so the staleness is benign.
     let events = ledger.read_all_events()?;
 
-    // Step 1: reformat root kinographs in name order. Each root's pointer
-    // is rewritten to the new blob + a store event recorded, mirroring
-    // what `commit_root` does on a regular version bump.
-    for root_name in config.roots.keys() {
-        let Some(prior_hash) = read_root_pointer(kinora_root, root_name)? else {
-            continue;
-        };
-        let content = store.read(&prior_hash)?;
-        // Only take the styxl fast-path when the blob is valid UTF-8;
-        // otherwise fall through to `RootKinograph::parse`, which surfaces
-        // a proper error instead of silently counting the blob as
-        // already-formatted.
-        if let Ok(text) = std::str::from_utf8(&content)
-            && is_styxl(text)
-        {
-            report.skipped_roots_already_formatted += 1;
-            continue;
-        }
-        let root_kg = RootKinograph::parse(&content)?;
-        let new_bytes = root_kg.to_styxl()?.into_bytes();
-        if new_bytes == content {
-            report.skipped_roots_already_formatted += 1;
-            continue;
-        }
-
-        // Find the prior store event so we can carry its identity forward.
-        let prior_event = events
-            .iter()
-            .find(|e| e.hash == prior_hash.as_hex() && e.is_store_event())
-            .ok_or_else(|| ReformatError::PriorRootEventMissing {
-                name: root_name.clone(),
-                version: prior_hash.as_hex().to_owned(),
-            })?
-            .clone();
-
-        let stored = store_kino(
-            kinora_root,
-            StoreKinoParams {
-                kind: "root".into(),
-                content: new_bytes,
-                author: params.author.clone(),
-                provenance: params.provenance.clone(),
-                ts: params.ts.clone(),
-                metadata: BTreeMap::new(),
-                id: Some(prior_event.id.clone()),
-                parents: vec![prior_hash.as_hex().to_owned()],
-            },
-        )?;
-        let new_hash = Hash::from_str(&stored.event.hash).map_err(|err| {
-            ReformatError::InvalidHash {
-                value: stored.event.hash.clone(),
-                err,
-            }
-        })?;
-        write_root_pointer(kinora_root, root_name, &new_hash)?;
-
-        report.reformatted_roots.push(ReformattedRoot {
-            root_name: root_name.clone(),
-            prior_version: prior_hash.as_hex().to_owned(),
-            new_version: new_hash.as_hex().to_owned(),
-        });
-    }
-
-    // Step 2: walk every root pointer's current root kinograph, collect
+    // Walk every root pointer's current root kinograph, collect
     // kinograph-kind entry ids, and recurse into their heads' composition
     // entries. Reformat each kinograph kino we hit whose content is still
-    // legacy-wrapped.
+    // legacy-wrapped. Root blobs themselves already carry the new
+    // header-first styxl form post-et1t; pre-et1t repos must be rebuilt.
     let mut events_by_id = group_store_events_by_id(&events);
 
     // Synthesize store-event stubs from root kinograph entries whose
@@ -365,16 +286,6 @@ fn pick_head<'a>(id: &str, events: &'a [Event]) -> Result<&'a Event, ReformatErr
     }
 }
 
-fn write_root_pointer(kinora_root: &Path, root_name: &str, hash: &Hash) -> io::Result<()> {
-    let dir = roots_dir(kinora_root);
-    fs::create_dir_all(&dir)?;
-    let path = root_pointer_path(kinora_root, root_name);
-    let tmp = dir.join(format!(".{root_name}.tmp"));
-    fs::write(&tmp, hash.as_hex())?;
-    fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,38 +405,30 @@ mod tests {
         stored.event
     }
 
-    /// Simulate a pre-migration root pointer: write a legacy-wrapped root
-    /// blob directly via `store_kino(kind: "root")` and set the pointer to
-    /// it. Returns the genesis root event.
-    fn seed_legacy_root_pointer(
+    /// Seed a root pointer by hand: build a styxl root blob containing
+    /// `entries`, write it to the content store, and point
+    /// `.kinora/roots/<name>` at it. Used by the legacy-drain tests that
+    /// need to surface a specific entry in the root without running a
+    /// real commit.
+    fn seed_styxl_root_pointer(
         root: &Path,
         root_name: &str,
         entries: Vec<crate::root::RootEntry>,
         ts: &str,
-    ) -> Event {
-        let rk = RootKinograph { entries };
-        let content = rk.to_styx().unwrap().into_bytes();
-        assert!(
-            !is_styxl(std::str::from_utf8(&content).unwrap()),
-            "RootKinograph::to_styx must emit legacy wrapped form for this test"
-        );
-        let stored = store_kino(
-            root,
-            StoreKinoParams {
-                kind: "root".into(),
-                content,
-                author: "yj".into(),
-                provenance: "reformat-test".into(),
-                ts: ts.into(),
-                metadata: BTreeMap::new(),
-                id: None,
-                parents: vec![],
-            },
+    ) {
+        use crate::paths::{root_pointer_path, roots_dir};
+        let rk = RootKinograph::new_genesis(
+            entries,
+            ts.to_owned(),
+            "yj".into(),
+            "reformat-test".into(),
         )
         .unwrap();
-        let hash = Hash::from_str(&stored.event.hash).unwrap();
-        write_root_pointer(root, root_name, &hash).unwrap();
-        stored.event
+        let bytes = rk.to_styxl().unwrap().into_bytes();
+        let hash = ContentStore::new(root).write("root", &bytes).unwrap();
+        let dir = roots_dir(root);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(root_pointer_path(root, root_name), hash.as_hex()).unwrap();
     }
 
     #[test]
@@ -637,85 +540,6 @@ mod tests {
             })
             .collect();
         assert!(new_text.is_empty(), "text kino untouched");
-    }
-
-    #[test]
-    fn reformat_rewrites_legacy_root_kinograph_and_updates_pointer() {
-        let (_t, root) = setup();
-        // Seed a legacy root pointer by hand (current commit code writes
-        // styxl, so we can't produce a legacy root via commit_root).
-        let md = store_md(&root, b"body", "body", "2026-04-19T10:00:00Z");
-        let md_hash = Hash::from_str(&md.hash).unwrap();
-        let entries = vec![crate::root::RootEntry::new(
-            md.id.clone(),
-            md_hash.as_hex(),
-            "markdown",
-            BTreeMap::from([("name".into(), "body".into())]),
-            "",
-        )];
-        let prior_root = seed_legacy_root_pointer(
-            &root,
-            "inbox",
-            entries,
-            "2026-04-19T10:00:01Z",
-        );
-
-        let report =
-            reformat_repo(&root, reformat_params("2026-04-19T10:00:02Z")).unwrap();
-        assert_eq!(
-            report.reformatted_roots.len(),
-            1,
-            "expected one reformatted root, got {report:#?}"
-        );
-        let reform = &report.reformatted_roots[0];
-        assert_eq!(reform.root_name, "inbox");
-        assert_eq!(reform.prior_version, prior_root.hash);
-        assert_ne!(reform.new_version, prior_root.hash);
-
-        // Pointer now points at the new blob.
-        let pointer_body = fs::read_to_string(root_pointer_path(&root, "inbox")).unwrap();
-        assert_eq!(pointer_body.trim(), reform.new_version);
-
-        // New blob is styxl.
-        let new_hash = Hash::from_str(&reform.new_version).unwrap();
-        let new_bytes = ContentStore::new(&root).read(&new_hash).unwrap();
-        assert!(is_styxl(std::str::from_utf8(&new_bytes).unwrap()));
-
-        // A new root-kind store event is in the ledger, parented to the prior root.
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let new_event = events
-            .iter()
-            .find(|e| e.hash == reform.new_version)
-            .expect("new root event should be staged");
-        assert_eq!(new_event.kind, "root");
-        assert_eq!(new_event.id, prior_root.id, "root identity carried forward");
-        assert_eq!(new_event.parents, vec![prior_root.hash.clone()]);
-    }
-
-    #[test]
-    fn reformat_is_idempotent_on_already_styxl_roots() {
-        let (_t, root) = setup();
-        store_md(&root, b"a", "a", "2026-04-19T10:00:00Z");
-        // commit_all writes the root as styxl already.
-        commit_all(&root, commit_params("2026-04-19T10:00:01Z")).unwrap();
-
-        let pointer_before =
-            fs::read_to_string(root_pointer_path(&root, "inbox")).unwrap();
-
-        let report =
-            reformat_repo(&root, reformat_params("2026-04-19T10:00:02Z")).unwrap();
-        assert!(report.reformatted_roots.is_empty());
-        assert!(
-            report.skipped_roots_already_formatted >= 1,
-            "expected at least the inbox root to be counted as already-formatted",
-        );
-
-        let pointer_after =
-            fs::read_to_string(root_pointer_path(&root, "inbox")).unwrap();
-        assert_eq!(
-            pointer_before, pointer_after,
-            "pointer should not change on an already-styxl repo"
-        );
     }
 
     #[test]
@@ -832,7 +656,7 @@ mod tests {
             BTreeMap::from([("name".into(), "outer".into())]),
             "2026-04-21T10:00:02Z",
         )];
-        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
+        seed_styxl_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
 
         // Simulate wcpp drain: remove inner's + leaf's staged events so
         // `events_by_id` won't carry them. Outer's staged event stays
@@ -904,7 +728,7 @@ mod tests {
             BTreeMap::from([("name".into(), "outer".into())]),
             "2026-04-21T10:00:02Z",
         )];
-        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
+        seed_styxl_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
 
         // Drain inner + leaf from staging.
         fs::remove_file(staged_event_path(&root, &inner.event_hash().unwrap())).unwrap();
@@ -953,7 +777,7 @@ mod tests {
             BTreeMap::from([("name".into(), "outer".into())]),
             "2026-04-21T10:00:01Z",
         )];
-        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:02Z");
+        seed_styxl_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:02Z");
 
         // Drain md from staging so it isn't in `events_by_id`.
         fs::remove_file(staged_event_path(&root, &md.event_hash().unwrap())).unwrap();

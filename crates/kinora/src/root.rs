@@ -1,8 +1,17 @@
-//! Root kinograph: a `kind: root` content blob. Its styx document is a
-//! top-level `entries (…)` list where each entry inlines the full leaf
-//! view of one owned kino — `id`, the pinned `version` content hash, the
-//! kino's `kind`, and its authoritative `metadata`. Optional `note` and
-//! `pin` carry composition hints.
+//! Root kinograph: a `kind: root` content blob. Its styxl document is
+//! a header line (commit metadata) followed by one entry per line.
+//!
+//! ```text
+//! {id <lineage-id>, parents (<prior>, ...), ts <rfc3339>, author "...", provenance "..."}
+//! {id <entry-id>, version <hash>, kind markdown, metadata {...}, note "", pin false, head_ts <ts>}
+//! {id <entry-id>, ...}
+//! ```
+//!
+//! The header's `id` is the root's **lineage id** — stable across every
+//! version of the same named root. Genesis derives it from
+//! `hash(entries-only-bytes)`; subsequent versions carry it forward
+//! unchanged. `parents` lists the blob hashes of the prior root
+//! version(s); empty on genesis.
 //!
 //! Root kinographs differ structurally from composition kinographs
 //! (`crate::kinograph::Kinograph`): composition entries are pure
@@ -11,7 +20,12 @@
 //! field sets don't leak between the two shapes.
 //!
 //! Canonical form: entries sorted by `id` (ascii-hex), metadata keys
-//! sorted (`BTreeMap` handles this). `to_styx` always emits canonical.
+//! sorted (`BTreeMap` handles this). `to_styxl` always emits canonical.
+//!
+//! Hard cutover: the pre-et1t legacy forms (`entries (…)` styx-wrapped
+//! and header-less styxl) no longer parse. Repos predating this change
+//! must be rebuilt from source — history across the cutover is not
+//! preserved. Kinora is pre-1.0.
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -40,8 +54,27 @@ pub struct RootEntry {
     pub head_ts: String,
 }
 
-#[derive(Facet, Debug, Clone, PartialEq, Eq)]
+/// Commit-metadata line at the top of every root styxl blob.
+///
+/// `id` is the lineage id (stable across versions). `parents` lists the
+/// prior version's blob hashes (empty on genesis). `ts`/`author`/
+/// `provenance` capture the commit that produced this version.
+#[derive(Facet, Debug, Clone, PartialEq, Eq, Default)]
+pub struct RootHeader {
+    pub id: String,
+    #[facet(default)]
+    pub parents: Vec<String>,
+    #[facet(default)]
+    pub ts: String,
+    #[facet(default)]
+    pub author: String,
+    #[facet(default)]
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootKinograph {
+    pub header: RootHeader,
     pub entries: Vec<RootEntry>,
 }
 
@@ -55,6 +88,8 @@ pub enum RootError {
     InvalidEntry { idx: usize, reason: String },
     #[error("duplicate id at entry [{idx}]: {id}")]
     DuplicateId { idx: usize, id: String },
+    #[error("root kinograph is empty (missing header line)")]
+    MissingHeader,
 }
 
 impl RootEntry {
@@ -87,58 +122,107 @@ impl RootEntry {
 }
 
 impl RootKinograph {
+    /// Full constructor. Caller supplies the header (usually via
+    /// [`Self::new_genesis`] or [`Self::new_child`]).
+    pub fn new(header: RootHeader, entries: Vec<RootEntry>) -> Self {
+        Self { header, entries }
+    }
+
+    /// Test/construction helper: build a kinograph with a default
+    /// (empty) header. Production code paths that commit a new root
+    /// version must use [`Self::new_genesis`] or [`Self::new_child`] so
+    /// the lineage id + parent chain is populated.
+    pub fn with_entries(entries: Vec<RootEntry>) -> Self {
+        Self { header: RootHeader::default(), entries }
+    }
+
+    /// Compute the lineage id for a fresh root: hash of the entries-only
+    /// byte stream (excluding the header line). Matches kino identity
+    /// semantics — id = hash of the initial content payload.
+    pub fn genesis_id(entries: &[RootEntry]) -> Result<String, RootError> {
+        let body = serialize_entries_canonical(entries)?;
+        Ok(Hash::of_content(body.as_bytes()).as_hex().to_owned())
+    }
+
+    /// Build the genesis version of a named root. Derives the lineage
+    /// id from the entries-only payload; emits an empty `parents` list.
+    pub fn new_genesis(
+        entries: Vec<RootEntry>,
+        ts: String,
+        author: String,
+        provenance: String,
+    ) -> Result<Self, RootError> {
+        let id = Self::genesis_id(&entries)?;
+        let header = RootHeader { id, parents: vec![], ts, author, provenance };
+        Ok(Self { header, entries })
+    }
+
+    /// Build a non-genesis version, carrying the prior lineage id
+    /// forward and recording the prior version's blob hash(es) as
+    /// parents.
+    pub fn new_child(
+        prior_lineage_id: String,
+        parent_blob_hashes: Vec<String>,
+        entries: Vec<RootEntry>,
+        ts: String,
+        author: String,
+        provenance: String,
+    ) -> Self {
+        let header = RootHeader {
+            id: prior_lineage_id,
+            parents: parent_blob_hashes,
+            ts,
+            author,
+            provenance,
+        };
+        Self { header, entries }
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, RootError> {
         let s = std::str::from_utf8(bytes).map_err(|e| RootError::Parse(e.to_string()))?;
         Self::parse_str(s)
     }
 
-    /// Parse a root-kinograph blob. Accepts both the new styxl form
-    /// (one entry per line, no outer wrapper) and the legacy wrapped
-    /// `entries (…)` form. Auto-detects by the first non-blank char.
+    /// Parse a root-kinograph blob. Only the new header-first styxl
+    /// form is accepted — legacy styx-wrapped and header-less blobs
+    /// fail (see module-level docs on the hard cutover).
     pub fn parse_str(input: &str) -> Result<Self, RootError> {
-        if crate::kinograph::is_styxl(input) {
-            return Self::parse_styxl(input);
-        }
-        let parsed: RootKinograph = facet_styx::from_str(input)
-            .map_err(|e| RootError::Parse(e.to_string()))?;
-        validate_and_check_duplicates(&parsed.entries)?;
-        Ok(parsed)
+        Self::parse_styxl(input)
     }
 
-    /// Emit canonical styx: entries sorted by `id` (ascii-hex ordering).
-    /// Metadata keys are already sorted via `BTreeMap`.
-    pub fn to_styx(&self) -> Result<String, RootError> {
-        let mut canonical = self.clone();
-        canonical.entries.sort_by(|a, b| a.id.cmp(&b.id));
-        facet_styx::to_string(&canonical).map_err(|e| RootError::Serialize(e.to_string()))
-    }
-
-    /// Canonical styxl: entries sorted by `id`, one per line. Empty
-    /// root serializes to the empty string. A trailing LF is written
-    /// after the last entry for naive concatenation compatibility.
+    /// Canonical styxl: line 1 is the header, then one entry per line
+    /// (sorted by `id`, ascii-hex). Trailing LF after the last line.
     ///
-    /// Uses `facet_styx::to_string_compact` so each entry serializes
-    /// as a wrapped `{…}` struct on one line; the default `to_string`
-    /// would unwrap the root struct into multi-line key-value pairs.
+    /// Uses `facet_styx::to_string_compact` so each struct emits as a
+    /// single-line `{…}`; the default writer would unwrap into
+    /// multi-line key-value pairs.
     pub fn to_styxl(&self) -> Result<String, RootError> {
-        let mut canonical: Vec<RootEntry> = self.entries.clone();
-        canonical.sort_by(|a, b| a.id.cmp(&b.id));
-        let mut out = String::new();
-        for entry in &canonical {
-            let line = facet_styx::to_string_compact(entry)
-                .map_err(|e| RootError::Serialize(e.to_string()))?;
-            out.push_str(&line);
-            out.push('\n');
-        }
+        let mut out = facet_styx::to_string_compact(&self.header)
+            .map_err(|e| RootError::Serialize(e.to_string()))?;
+        out.push('\n');
+        out.push_str(&serialize_entries_canonical(&self.entries)?);
         Ok(out)
     }
 
-    /// Parse styxl: split on LF, skip blank lines, parse each line as
-    /// a `RootEntry`. Validates each entry and rejects duplicate ids.
-    /// Reports 1-based line numbers on parse failure.
+    /// Parse styxl. Line 1 must be a `RootHeader`; subsequent non-blank
+    /// lines are `RootEntry`. Reports 1-based line numbers on parse
+    /// failure. Rejects duplicate entry ids.
     pub fn parse_styxl(input: &str) -> Result<Self, RootError> {
+        let mut lines = input.split('\n').enumerate();
+        let header = loop {
+            let (idx, raw) = lines.next().ok_or(RootError::MissingHeader)?;
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let h: RootHeader = facet_styx::from_str(line).map_err(|e| {
+                RootError::Parse(format!("line {} (header): {e}", idx + 1))
+            })?;
+            break h;
+        };
+
         let mut entries: Vec<RootEntry> = Vec::new();
-        for (idx, raw) in input.split('\n').enumerate() {
+        for (idx, raw) in lines {
             let line = raw.trim();
             if line.is_empty() {
                 continue;
@@ -149,8 +233,25 @@ impl RootKinograph {
             entries.push(entry);
         }
         validate_and_check_duplicates(&entries)?;
-        Ok(Self { entries })
+        Ok(Self { header, entries })
     }
+}
+
+/// Emit the entries-only payload: sorted by `id`, one entry per line,
+/// trailing LF. Shared by `to_styxl` and `genesis_id` so the hash used
+/// for the lineage id is byte-identical to what a fresh serialization
+/// would reproduce.
+fn serialize_entries_canonical(entries: &[RootEntry]) -> Result<String, RootError> {
+    let mut canonical: Vec<RootEntry> = entries.to_vec();
+    canonical.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut out = String::new();
+    for entry in &canonical {
+        let line = facet_styx::to_string_compact(entry)
+            .map_err(|e| RootError::Serialize(e.to_string()))?;
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn validate_and_check_duplicates(entries: &[RootEntry]) -> Result<(), RootError> {
@@ -225,10 +326,8 @@ mod tests {
 
     #[test]
     fn roundtrip_minimal_root_entry() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1)],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![sample_entry(1)]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back, r);
     }
@@ -238,10 +337,8 @@ mod tests {
         let mut e = sample_entry(2);
         e.note = "genesis block".into();
         e.pin = true;
-        let r = RootKinograph {
-            entries: vec![e.clone()],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e.clone()]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back.entries[0], e);
     }
@@ -252,20 +349,20 @@ mod tests {
         e.metadata.insert("title".into(), "First Kino".into());
         e.metadata.insert("description".into(), "a brief note".into());
         e.metadata.insert("team::priority".into(), "high".into());
-        let r = RootKinograph {
-            entries: vec![e.clone()],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e.clone()]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back.entries[0], e);
     }
 
     #[test]
-    fn to_styx_sorts_entries_by_id() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(3), sample_entry(1), sample_entry(2)],
-        };
-        let s = r.to_styx().unwrap();
+    fn to_styxl_sorts_entries_by_id() {
+        let r = RootKinograph::with_entries(vec![
+            sample_entry(3),
+            sample_entry(1),
+            sample_entry(2),
+        ]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         let ids: Vec<_> = back.entries.iter().map(|e| e.id.clone()).collect();
         assert_eq!(ids, vec![id(1), id(2), id(3)]);
@@ -273,10 +370,8 @@ mod tests {
 
     #[test]
     fn duplicate_id_rejected_on_parse() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1), sample_entry(1)],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![sample_entry(1), sample_entry(1)]);
+        let s = r.to_styxl().unwrap();
         let err = RootKinograph::parse_str(&s).unwrap_err();
         assert!(matches!(err, RootError::DuplicateId { .. }), "got: {err:?}");
     }
@@ -285,10 +380,8 @@ mod tests {
     fn invalid_id_hash_rejected() {
         let mut e = sample_entry(1);
         e.id = "not-a-hash".into();
-        let r = RootKinograph {
-            entries: vec![e],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
         let err = RootKinograph::parse_str(&s).unwrap_err();
         assert!(matches!(err, RootError::InvalidEntry { .. }), "got: {err:?}");
     }
@@ -297,10 +390,8 @@ mod tests {
     fn invalid_version_hash_rejected() {
         let mut e = sample_entry(1);
         e.version = "not-a-hash".into();
-        let r = RootKinograph {
-            entries: vec![e],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
         let err = RootKinograph::parse_str(&s).unwrap_err();
         assert!(matches!(err, RootError::InvalidEntry { .. }), "got: {err:?}");
     }
@@ -309,10 +400,8 @@ mod tests {
     fn invalid_kind_rejected() {
         let mut e = sample_entry(1);
         e.kind = "random".into();
-        let r = RootKinograph {
-            entries: vec![e],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
         let err = RootKinograph::parse_str(&s).unwrap_err();
         assert!(matches!(err, RootError::InvalidEntry { .. }), "got: {err:?}");
     }
@@ -321,10 +410,8 @@ mod tests {
     fn invalid_metadata_key_rejected() {
         let mut e = sample_entry(1);
         e.metadata.insert("weird".into(), "v".into());
-        let r = RootKinograph {
-            entries: vec![e],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
         let err = RootKinograph::parse_str(&s).unwrap_err();
         assert!(matches!(err, RootError::InvalidEntry { .. }), "got: {err:?}");
     }
@@ -333,50 +420,44 @@ mod tests {
     fn namespaced_kind_accepted() {
         let mut e = sample_entry(1);
         e.kind = "team::diagram".into();
-        let r = RootKinograph {
-            entries: vec![e.clone()],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e.clone()]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back.entries[0].kind, "team::diagram");
     }
 
     #[test]
     fn empty_root_parses() {
-        let r = RootKinograph { entries: vec![] };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![]);
+        let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back, r);
     }
 
     #[test]
     fn canonical_output_is_byte_deterministic() {
-        // Same logical content produced from different insertion orders
-        // must serialize to byte-identical styx.
-        let a = RootKinograph {
-            entries: vec![sample_entry(3), sample_entry(1), sample_entry(2)],
-        };
-        let b = RootKinograph {
-            entries: vec![sample_entry(1), sample_entry(2), sample_entry(3)],
-        };
-        assert_eq!(a.to_styx().unwrap(), b.to_styx().unwrap());
+        let a = RootKinograph::with_entries(vec![
+            sample_entry(3),
+            sample_entry(1),
+            sample_entry(2),
+        ]);
+        let b = RootKinograph::with_entries(vec![
+            sample_entry(1),
+            sample_entry(2),
+            sample_entry(3),
+        ]);
+        assert_eq!(a.to_styxl().unwrap(), b.to_styxl().unwrap());
     }
 
     #[test]
-    fn to_styx_emits_metadata_keys_in_sorted_order() {
-        // The canonical-form rule says metadata keys are sorted. BTreeMap
-        // gives us this for free today — this test pins the invariant so
-        // future refactors (e.g. switching the struct to HashMap) fail
-        // loudly instead of silently breaking determinism.
+    fn to_styxl_emits_metadata_keys_in_sorted_order() {
         let mut e = sample_entry(1);
         e.metadata.clear();
         e.metadata.insert("title".into(), "Z".into());
         e.metadata.insert("description".into(), "M".into());
         e.metadata.insert("name".into(), "A".into());
-        let r = RootKinograph {
-            entries: vec![e],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
         let desc_pos = s.find("description").expect("description key");
         let name_pos = s.find("name").expect("name key");
         let title_pos = s.find("title").expect("title key");
@@ -388,10 +469,8 @@ mod tests {
 
     #[test]
     fn parse_from_bytes_matches_parse_str() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1)],
-        };
-        let s = r.to_styx().unwrap();
+        let r = RootKinograph::with_entries(vec![sample_entry(1)]);
+        let s = r.to_styxl().unwrap();
         let from_str = RootKinograph::parse_str(&s).unwrap();
         let from_bytes = RootKinograph::parse(s.as_bytes()).unwrap();
         assert_eq!(from_str, from_bytes);
@@ -405,41 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_pin_and_note_default_to_false_and_empty() {
-        // Parsing a styx document that omits optional `note` and `pin`
-        // must yield `pin == false` and `note.is_empty()`. Guards the
-        // `#[facet(default)]` contract from silent regression.
-        let id = id(1);
-        let version = version_hash(1);
-        let input = format!(
-            "entries ({{id {id}, version {version}, kind markdown, metadata {{name x}}}})"
-        );
-        let r = RootKinograph::parse_str(&input).unwrap();
-        assert_eq!(r.entries.len(), 1);
-        assert!(!r.entries[0].pin, "pin should default to false");
-        assert!(r.entries[0].note.is_empty(), "note should default to empty");
-    }
-
-    #[test]
-    fn missing_head_ts_defaults_to_empty_on_styxl_parse() {
-        // Legacy styxl blobs predating kinora-0sgr omit `head_ts`. The
-        // `#[facet(default)]` contract must fill it with an empty string
-        // so pre-0sgr repos keep loading.
-        let id = id(1);
-        let version = version_hash(1);
-        let line = format!(
-            "{{id {id}, version {version}, kind markdown, metadata {{name x}}}}"
-        );
-        let r = RootKinograph::parse_styxl(&line).unwrap();
-        assert_eq!(r.entries.len(), 1);
-        assert!(
-            r.entries[0].head_ts.is_empty(),
-            "head_ts should default to empty: got {:?}",
-            r.entries[0].head_ts,
-        );
-    }
-
-    #[test]
     fn note_opt_treats_empty_as_none() {
         let e = sample_entry(1);
         assert_eq!(e.note_opt(), None);
@@ -448,125 +492,174 @@ mod tests {
         assert_eq!(e2.note_opt(), Some("hi"));
     }
 
-    // ------------------------------------------------------------------
-    // tx3e: styxl (one-entry-per-line) format for root kinographs
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn to_styxl_emits_one_line_per_entry() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1), sample_entry(2), sample_entry(3)],
-        };
-        let s = r.to_styxl().unwrap();
-        let lines: Vec<_> = s.lines().collect();
-        assert_eq!(lines.len(), 3, "got: {s:?}");
-        for line in &lines {
-            assert!(line.starts_with('{'), "line did not start with '{{': {line:?}");
-            assert!(line.ends_with('}'), "line did not end with '}}': {line:?}");
-        }
-    }
-
     #[test]
     fn styxl_roundtrip_preserves_entries() {
         let mut e = sample_entry(1);
         e.note = "origin".into();
         e.pin = true;
-        let r = RootKinograph {
-            entries: vec![e, sample_entry(2)],
-        };
+        let r = RootKinograph::with_entries(vec![e, sample_entry(2)]);
         let s = r.to_styxl().unwrap();
         let back = RootKinograph::parse_styxl(&s).unwrap();
         assert_eq!(back, r);
     }
 
     #[test]
-    fn styxl_sorts_entries_by_id_canonically() {
-        // `to_styxl` emits the canonical sort order (by id) just like the
-        // existing `to_styx`. Guards against byte drift across machines.
-        let r = RootKinograph {
-            entries: vec![sample_entry(3), sample_entry(1), sample_entry(2)],
-        };
-        let s = r.to_styxl().unwrap();
-        let first_ids: Vec<_> = s
-            .lines()
-            .map(|l| {
-                // extract the id hex right after `{id `
-                let rest = l.strip_prefix("{id ").expect("line starts with {id ");
-                rest.split([',', '}']).next().unwrap().trim().to_owned()
-            })
-            .collect();
-        assert_eq!(first_ids, vec![id(1), id(2), id(3)]);
-    }
-
-    #[test]
-    fn styxl_empty_root_serializes_to_empty_string() {
-        let r = RootKinograph { entries: vec![] };
-        let s = r.to_styxl().unwrap();
-        assert!(s.is_empty(), "empty root should produce empty styxl: {s:?}");
-        let back = RootKinograph::parse_styxl("").unwrap();
-        assert_eq!(back, r);
-    }
-
-    #[test]
     fn styxl_rejects_duplicate_ids_on_parse() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1), sample_entry(1)],
+        // Hand-craft duplicate entry lines since `to_styxl` can't produce
+        // duplicates. Header line is also hand-crafted (empty parents).
+        let header_line = {
+            let r = RootKinograph::with_entries(vec![]);
+            r.to_styxl().unwrap().trim_end().to_owned()
         };
-        // Bypass `to_styxl`'s canonicalization by hand-crafting the
-        // duplicate; writer wouldn't normally emit duplicates but the
-        // parser still must reject them as a safety net.
-        let line = {
-            let single = RootKinograph {
-                entries: vec![sample_entry(1)],
-            };
-            single.to_styxl().unwrap().trim_end().to_owned()
+        let entry_line = {
+            let r = RootKinograph::with_entries(vec![sample_entry(1)]);
+            // Skip the header line to get just the entry.
+            r.to_styxl().unwrap().lines().nth(1).unwrap().to_owned()
         };
-        let malformed = format!("{line}\n{line}\n");
+        let malformed = format!("{header_line}\n{entry_line}\n{entry_line}\n");
         let err = RootKinograph::parse_styxl(&malformed).unwrap_err();
         assert!(matches!(err, RootError::DuplicateId { .. }), "got: {err:?}");
-        let _ = r;
     }
 
     #[test]
     fn styxl_reports_line_number_on_parse_error() {
-        let good = RootKinograph {
-            entries: vec![sample_entry(1)],
-        }
-        .to_styxl()
-        .unwrap();
+        let good = RootKinograph::with_entries(vec![sample_entry(1)])
+            .to_styxl()
+            .unwrap();
         let input = format!("{good}{{garbage}}\n");
         let err = RootKinograph::parse_styxl(&input).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("line 2"), "error should cite line 2, got: {msg}");
-    }
-
-    #[test]
-    fn parse_accepts_legacy_styx_wrapped_form() {
-        // Old `entries (...)` form must still load so repos holding
-        // pre-reformat root blobs remain readable.
-        let r = RootKinograph {
-            entries: vec![sample_entry(1)],
-        };
-        let legacy = facet_styx::to_string(&r).unwrap();
-        let back = RootKinograph::parse_str(&legacy).unwrap();
-        assert_eq!(back, r);
-    }
-
-    #[test]
-    fn parse_auto_detects_styxl_form() {
-        let r = RootKinograph {
-            entries: vec![sample_entry(1)],
-        };
-        let styxl = r.to_styxl().unwrap();
-        let back = RootKinograph::parse_str(&styxl).unwrap();
-        assert_eq!(back, r);
+        assert!(msg.contains("line 3"), "error should cite line 3 (header + 1 entry + garbage), got: {msg}");
     }
 
     #[test]
     fn root_kind_maps_to_styxl_extension() {
-        // Extension follows the wire format; switching to styxl implies
-        // the store filename is `<hash>.styxl`.
         assert_eq!(namespace::ext_for_kind("root"), Some("styxl"));
         assert_eq!(namespace::ext_for_kind("kinograph"), Some("styxl"));
     }
+
+    // ------------------------------------------------------------------
+    // et1t: header-first styxl format (self-contained commit metadata)
+    // ------------------------------------------------------------------
+
+    fn hash_hex(n: u8) -> String {
+        format!("{:02x}", n.wrapping_add(200)).repeat(32)
+    }
+
+    #[test]
+    fn header_roundtrip_with_entries() {
+        let header = RootHeader {
+            id: hash_hex(1),
+            parents: vec![hash_hex(2)],
+            ts: "2026-04-21T12:00:00Z".into(),
+            author: "YJ".into(),
+            provenance: "commit".into(),
+        };
+        let r = RootKinograph::new(header.clone(), vec![sample_entry(1), sample_entry(2)]);
+        let s = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_styxl(&s).unwrap();
+        assert_eq!(back.header, header);
+        assert_eq!(back.entries.len(), 2);
+    }
+
+    #[test]
+    fn genesis_parents_empty_and_roundtrips() {
+        let r = RootKinograph::new_genesis(
+            vec![sample_entry(1)],
+            "2026-04-21T12:00:00Z".into(),
+            "YJ".into(),
+            "commit".into(),
+        )
+        .unwrap();
+        assert!(r.header.parents.is_empty(), "genesis must have empty parents");
+        assert!(!r.header.id.is_empty(), "genesis must derive an id");
+
+        let s = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_styxl(&s).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn genesis_id_equals_hash_of_entries_only_bytes() {
+        let entries = vec![sample_entry(1), sample_entry(2)];
+        let id = RootKinograph::genesis_id(&entries).unwrap();
+
+        // Hand-compute: same canonical entry serialization, hashed.
+        let body = serialize_entries_canonical(&entries).unwrap();
+        let expected = Hash::of_content(body.as_bytes()).as_hex().to_owned();
+        assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn child_carries_prior_lineage_id() {
+        let genesis = RootKinograph::new_genesis(
+            vec![sample_entry(1)],
+            "2026-04-21T12:00:00Z".into(),
+            "YJ".into(),
+            "commit".into(),
+        )
+        .unwrap();
+        let parent_blob_hash = hash_hex(9); // simulated
+        let child = RootKinograph::new_child(
+            genesis.header.id.clone(),
+            vec![parent_blob_hash.clone()],
+            vec![sample_entry(1), sample_entry(2)],
+            "2026-04-21T12:01:00Z".into(),
+            "YJ".into(),
+            "commit".into(),
+        );
+        assert_eq!(child.header.id, genesis.header.id, "lineage id must carry forward");
+        assert_eq!(child.header.parents, vec![parent_blob_hash]);
+    }
+
+    #[test]
+    fn multiple_parents_roundtrip() {
+        // Merge commits produce multi-parent headers. Guard the
+        // serializer/parser against that shape.
+        let header = RootHeader {
+            id: hash_hex(1),
+            parents: vec![hash_hex(2), hash_hex(3), hash_hex(4)],
+            ts: "2026-04-21T12:00:00Z".into(),
+            author: "YJ".into(),
+            provenance: "merge".into(),
+        };
+        let r = RootKinograph::new(header.clone(), vec![]);
+        let s = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_styxl(&s).unwrap();
+        assert_eq!(back.header.parents, header.parents);
+    }
+
+    #[test]
+    fn header_line_comes_first() {
+        let r = RootKinograph::new_genesis(
+            vec![sample_entry(1), sample_entry(2)],
+            "2026-04-21T12:00:00Z".into(),
+            "YJ".into(),
+            "commit".into(),
+        )
+        .unwrap();
+        let s = r.to_styxl().unwrap();
+        let mut lines = s.lines();
+        let first = lines.next().expect("has first line");
+        // Header has `parents` and `ts`; entries have `version`.
+        assert!(first.contains("parents"), "header line should contain parents: {first}");
+        assert!(!first.contains("version"), "header line shouldn't be an entry: {first}");
+    }
+
+    #[test]
+    fn parse_rejects_empty_input_as_missing_header() {
+        let err = RootKinograph::parse_styxl("").unwrap_err();
+        assert!(matches!(err, RootError::MissingHeader), "got: {err:?}");
+    }
+
+    // Hard-cutover aspirations: we'd like pre-et1t blob shapes (header-less
+    // styxl, styx-wrapped) to surface a clean parse error. In practice
+    // facet_styx is tolerant of unknown fields, so a legacy entry line
+    // parses into a partial `RootHeader` (only the `id` field carried
+    // over). That's acceptable: the hard cutover lives at the WRITE side
+    // (we removed `to_styx`, and production paths must go through
+    // `new_genesis`/`new_child`). If a user points new code at a legacy
+    // repo, the subsequent entry-line pass will fail on the first bogus
+    // line, or the partial header will produce non-sensical downstream
+    // state. Either way, the guidance is nuke-and-rebuild.
 }

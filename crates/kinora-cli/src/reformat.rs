@@ -36,29 +36,21 @@ pub fn run_reformat(cwd: &Path, args: ReformatRunArgs) -> Result<ReformatRunRepo
 
 /// One-screen human summary printed after `kinora reformat` succeeds.
 ///
-/// Two counters per kind (kinographs, roots): how many were reformatted vs
-/// already in the target format. If any kinographs were staged, the summary
-/// ends with a line suggesting `kinora commit` so the user knows that
-/// staging is only the first step.
+/// Counts how many kinographs were reformatted vs already in the target
+/// format. If any kinographs were staged, the summary ends with a line
+/// suggesting `kinora commit` so the user knows that staging is only
+/// the first step.
 pub fn format_reformat_summary(r: &ReformatRunReport) -> String {
     let inner = &r.inner;
     let kg_new = inner.reformatted_kinographs.len();
     let kg_skipped = inner.skipped_kinographs_already_formatted;
-    let root_new = inner.reformatted_roots.len();
-    let root_skipped = inner.skipped_roots_already_formatted;
 
     let mut out = String::new();
     out.push_str(&format!(
-        "reformatted {} kinograph{} ({} already styxl)\n",
+        "reformatted {} kinograph{} ({} already styxl)",
         kg_new,
         plural_s(kg_new),
         kg_skipped,
-    ));
-    out.push_str(&format!(
-        "reformatted {} root{} ({} already styxl)",
-        root_new,
-        plural_s(root_new),
-        root_skipped,
     ));
     if kg_new > 0 {
         out.push_str("\nrun `kinora commit` to promote the staged versions to heads");
@@ -74,7 +66,7 @@ fn plural_s(n: usize) -> &'static str {
 mod tests {
     use super::*;
     use kinora::init::init;
-    use kinora::reformat::{ReformattedKinograph, ReformattedRoot};
+    use kinora::reformat::ReformattedKinograph;
     use tempfile::TempDir;
 
     fn repo() -> TempDir {
@@ -95,9 +87,7 @@ mod tests {
         let tmp = repo();
         let r = run_reformat(tmp.path(), args()).unwrap();
         assert!(r.inner.reformatted_kinographs.is_empty());
-        assert!(r.inner.reformatted_roots.is_empty());
         assert_eq!(r.inner.skipped_kinographs_already_formatted, 0);
-        assert_eq!(r.inner.skipped_roots_already_formatted, 0);
     }
 
     #[test]
@@ -136,10 +126,6 @@ mod tests {
             "got: {s}"
         );
         assert!(
-            s.contains("reformatted 0 roots (0 already styxl)"),
-            "got: {s}"
-        );
-        assert!(
             !s.contains("kinora commit"),
             "no commit hint when nothing staged: {s}"
         );
@@ -154,17 +140,10 @@ mod tests {
                 new_version: "c".repeat(64),
             }],
             skipped_kinographs_already_formatted: 0,
-            reformatted_roots: vec![ReformattedRoot {
-                root_name: "main".into(),
-                prior_version: "d".repeat(64),
-                new_version: "e".repeat(64),
-            }],
-            skipped_roots_already_formatted: 0,
         };
         let r = ReformatRunReport { inner };
         let s = format_reformat_summary(&r);
         assert!(s.contains("reformatted 1 kinograph (0 already styxl)"), "got: {s}");
-        assert!(s.contains("reformatted 1 root (0 already styxl)"), "got: {s}");
     }
 
     #[test]
@@ -172,13 +151,10 @@ mod tests {
         let inner = ReformatReport {
             reformatted_kinographs: vec![],
             skipped_kinographs_already_formatted: 3,
-            reformatted_roots: vec![],
-            skipped_roots_already_formatted: 2,
         };
         let r = ReformatRunReport { inner };
         let s = format_reformat_summary(&r);
         assert!(s.contains("reformatted 0 kinographs (3 already styxl)"), "got: {s}");
-        assert!(s.contains("reformatted 0 roots (2 already styxl)"), "got: {s}");
     }
 
     #[test]
@@ -190,32 +166,9 @@ mod tests {
                 new_version: "c".repeat(64),
             }],
             skipped_kinographs_already_formatted: 0,
-            reformatted_roots: vec![],
-            skipped_roots_already_formatted: 0,
         };
         let r = ReformatRunReport { inner };
         let s = format_reformat_summary(&r);
         assert!(s.contains("kinora commit"), "expected commit hint: {s}");
-    }
-
-    #[test]
-    fn format_summary_no_commit_hint_when_only_roots_reformatted() {
-        let inner = ReformatReport {
-            reformatted_kinographs: vec![],
-            skipped_kinographs_already_formatted: 0,
-            reformatted_roots: vec![ReformattedRoot {
-                root_name: "main".into(),
-                prior_version: "d".repeat(64),
-                new_version: "e".repeat(64),
-            }],
-            skipped_roots_already_formatted: 0,
-        };
-        let r = ReformatRunReport { inner };
-        let s = format_reformat_summary(&r);
-        // Roots are rewritten in place — no staged commit needed to surface them.
-        assert!(
-            !s.contains("kinora commit"),
-            "commit hint should only appear when kinographs were staged: {s}"
-        );
     }
 }
