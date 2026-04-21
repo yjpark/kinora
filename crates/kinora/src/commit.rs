@@ -3761,4 +3761,97 @@ roots {
             "head_ts must track the pinned version, not the fresh head",
         );
     }
+
+    // ------------------------------------------------------------------
+    // kinora-ojc8: drain_archived_orphans — migration-debt cleanup for
+    // repos whose staging still carries events already recorded in a
+    // commit-archive kino (happens when pre-wcpp binaries archived
+    // without draining, or when later no-op commits can't fire the drain).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn drain_archived_orphans_drops_staged_event_already_in_archive() {
+        let (_t, root) = setup();
+        // Stage + commit — wcpp archives the event into an archive kino
+        // and drains staging. Capture the event up-front so we can
+        // replay it into staging afterward.
+        let e = store_md(&root, b"alpha", "alpha", "2026-04-20T10:00:00Z");
+        commit_all(&root, params("yj", "2026-04-20T10:00:01Z")).unwrap();
+        assert!(
+            !staged_event_exists(&root, &e),
+            "wcpp should have drained the store event post-archive",
+        );
+
+        // Simulate migration debt: pre-wcpp archived it but couldn't drain
+        // from staging. Write the same event back.
+        let ledger = Ledger::new(&root);
+        let (_, was_new) = ledger.write_event(&e).unwrap();
+        assert!(was_new, "replay should create a fresh staged file");
+        assert!(staged_event_exists(&root, &e), "orphan should be present before drain");
+
+        let dropped = drain_archived_orphans(&root).unwrap();
+        assert_eq!(dropped, 1, "orphan event should be dropped");
+        assert!(
+            !staged_event_exists(&root, &e),
+            "orphan event should be drained",
+        );
+    }
+
+    #[test]
+    fn drain_archived_orphans_preserves_unarchived_staged_events() {
+        let (_t, root) = setup();
+        // Stage a kino but do NOT commit — no archive is produced.
+        let e = store_md(&root, b"solo", "solo", "2026-04-20T10:00:00Z");
+        assert!(staged_event_exists(&root, &e), "staged event present before drain");
+
+        let dropped = drain_archived_orphans(&root).unwrap();
+        assert_eq!(dropped, 0, "nothing to drop without an archive");
+        assert!(
+            staged_event_exists(&root, &e),
+            "unarchived event must survive drain",
+        );
+    }
+
+    #[test]
+    fn drain_archived_orphans_respects_keep_last_n_policy() {
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  rfcs { policy "keep-last-5" }
+}
+"#,
+        );
+        // Stage + assign a kino to rfcs + commit. KeepLastN produces an
+        // archive but does NOT drain staging post-archive (its retention
+        // is staging-based, per wcpp). The archive will still reference
+        // the staged event's hash — but drain_archived_orphans must
+        // skip it because the source root is KeepLastN.
+        let e = store_md(&root, b"rfc", "rfc", "2026-04-20T10:00:00Z");
+        write_assign_for(&root, &e.id, "rfcs", vec![], "2026-04-20T10:00:01Z");
+        commit_all(&root, params("yj", "2026-04-20T10:00:02Z")).unwrap();
+        assert!(
+            staged_event_exists(&root, &e),
+            "KeepLastN keeps the event in staging (no wcpp drain)",
+        );
+
+        let dropped = drain_archived_orphans(&root).unwrap();
+        assert_eq!(
+            dropped, 0,
+            "KeepLastN source root's archive entries must not be drained",
+        );
+        assert!(
+            staged_event_exists(&root, &e),
+            "KeepLastN retention must survive orphan drain",
+        );
+    }
+
+    #[test]
+    fn drain_archived_orphans_is_noop_when_commits_pointer_absent() {
+        let (_t, root) = setup();
+        // No commits have run — commits root pointer doesn't exist.
+        let dropped = drain_archived_orphans(&root).unwrap();
+        assert_eq!(dropped, 0, "no commits pointer → nothing to inspect");
+    }
 }

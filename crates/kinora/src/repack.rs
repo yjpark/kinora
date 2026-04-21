@@ -308,4 +308,52 @@ mod tests {
             r.clone.filenames_rewritten
         );
     }
+
+    #[test]
+    fn repack_drains_orphan_archived_events_left_behind() {
+        use crate::ledger::Ledger;
+        use crate::paths::staged_event_path;
+
+        let (_tmp, repo) = setup();
+        let kin = kinora_root(&repo);
+
+        // Stage + commit. wcpp archives the event and drains staging.
+        let stored = store_kino(&kin, store_params("2026-04-20T01:00:00Z")).unwrap();
+        let orphan = stored.event.clone();
+        commit_all(
+            &kin,
+            CommitParams {
+                author: "yj".into(),
+                provenance: "repack-test".into(),
+                ts: "2026-04-20T01:30:00Z".into(),
+            },
+        )
+        .unwrap();
+        let orphan_hash = orphan.event_hash().unwrap();
+        assert!(
+            !staged_event_path(&kin, &orphan_hash).exists(),
+            "wcpp should drain the event post-archive",
+        );
+
+        // Simulate migration debt: pre-wcpp archived but never drained.
+        Ledger::new(&kin).write_event(&orphan).unwrap();
+        assert!(
+            staged_event_path(&kin, &orphan_hash).exists(),
+            "orphan present before repack",
+        );
+
+        // Repack with no new work: commits are no-ops, so wcpp's own
+        // post-archive drain doesn't fire — the orphan-drain pass is
+        // what closes the gap.
+        let r = repack_repo(&repo, repack_params("2026-04-20T02:00:00Z")).unwrap();
+        assert_eq!(
+            r.orphan_events_drained, 1,
+            "repack should report the drained orphan",
+        );
+        let post = kinora_root(&repo);
+        assert!(
+            !staged_event_path(&post, &orphan_hash).exists(),
+            "orphan should be gone after repack",
+        );
+    }
 }
