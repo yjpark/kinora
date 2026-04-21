@@ -1,11 +1,11 @@
 ---
 # kinora-0sgr
 title: Record head_ts on RootEntry so GC is independent of staging
-status: in-progress
+status: completed
 type: feature
 priority: high
 created_at: 2026-04-21T13:50:34Z
-updated_at: 2026-04-21T13:58:21Z
+updated_at: 2026-04-21T14:04:38Z
 blocking:
     - kinora-wcpp
 ---
@@ -59,3 +59,46 @@ retention semantics from staging, unblocking wcpp.
   without wcpp)
 - [ ] Bean todo items all checked off
 - [ ] Commits: tests / implementation / review-fixes
+
+## Summary of Changes
+
+Decouples MaxAge root-entry GC from the staged event stream by recording the
+head event's RFC3339 ts on `RootEntry` itself. Unblocks kinora-wcpp.
+
+### Code changes
+
+- `crates/kinora/src/root.rs`: Added `head_ts: String` field to `RootEntry`
+  with `#[facet(default)]` so legacy (pre-0sgr) kinograph blobs still parse
+  with an empty default. `RootEntry::new` signature takes `head_ts` as the
+  last arg — all (mostly test-only) callers updated.
+- `crates/kinora/src/commit.rs`:
+  - `build_root` populates `entry.head_ts` from the picked head store event.
+  - `apply_root_entry_gc` reads from `entry.head_ts` instead of looking up
+    the event by hash in the staged stream. Empty → keep (legacy). Parse
+    error → log + keep (conservative). Older than cutoff → drop (unless
+    pin or implicit-pinned). `events` arg removed from the signature.
+  - `propagate_pins` now copies `head_ts` alongside `version`, so pinned
+    entries don't carry a ts that belongs to a different version.
+- `crates/kinora/src/resolve.rs`: `ingest_root_kinographs` passes
+  `re.head_ts` into the synthesized store Event — render/resolve now see a
+  real ts for archive-drained heads.
+
+### Tests added (6)
+
+- `build_root_populates_head_ts_from_head_event` (commit)
+- `entry_gc_uses_head_ts_on_entry_not_staged_event` (commit)
+- `entry_gc_keeps_entry_when_head_ts_is_empty` (commit)
+- `entry_gc_keeps_entry_when_head_ts_is_unparseable` (commit)
+- `propagate_pins_keeps_head_ts_paired_with_version` (commit)
+- `missing_head_ts_defaults_to_empty_on_styxl_parse` (root)
+
+### Acceptance
+
+- 509 workspace tests pass (up from 506; +3 kinora unit tests)
+- Zero compiler warnings
+- 3 commits: c17e767 (tests+stub), c4fb25f (implementation), 0c53fac (review)
+
+### Follow-up
+
+Unblocks `kinora-wcpp` — MaxAge staged events can now be drained after
+archive without orphaning entries from their retention signal.
