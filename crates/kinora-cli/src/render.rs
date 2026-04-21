@@ -309,14 +309,9 @@ mod tests {
     /// Needed for tests that route kinos into `main` via explicit assigns —
     /// the default config only auto-provisions `inbox`.
     fn declare_main_root(kin: &std::path::Path) {
-        // keep-last-10 rather than Never: under kinora-bayr the Never
-        // policy prunes owned store events from staging after commit, and
-        // the current Resolver only looks at staging — so render would
-        // see no identities for the committed kinos. These tests are about
-        // root grouping semantics, not prune policy.
         std::fs::write(
             kinora::paths::config_path(kin),
-            "repo-url \"https://github.com/edger-dev/kinora\"\nroots {\n  main { policy \"keep-last-10\" }\n}\n",
+            "repo-url \"https://github.com/edger-dev/kinora\"\nroots {\n  main { policy \"never\" }\n}\n",
         )
         .unwrap();
     }

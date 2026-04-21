@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
 use std::str::FromStr;
 
 use crate::event::Event;
 use crate::hash::{Hash, HashParseError};
 use crate::ledger::{Ledger, LedgerError};
+use crate::paths::{root_pointer_path, roots_dir};
+use crate::root::{RootError, RootKinograph};
 use crate::store::{ContentStore, StoreError};
 
 #[derive(Debug, thiserror::Error)]
@@ -12,6 +15,12 @@ pub enum ResolveError {
     Ledger(#[from] LedgerError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(transparent)]
+    Root(#[from] RootError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("root pointer at {path} is not a valid hash: {body:?}")]
+    InvalidRootPointer { path: std::path::PathBuf, body: String },
     #[error("invalid hash `{value}`: {err}")]
     InvalidHash {
         value: String,
@@ -130,6 +139,18 @@ impl Resolver {
                 .or_default()
                 .push((lineage, event));
         }
+
+        // Kinograph layout: committed root blobs. Under Never policy the
+        // staged store events for owned kinos are pruned after archive —
+        // the root kinograph is then the only on-disk record carrying
+        // (id, version, kind, metadata). Walk every root pointer and
+        // synthesize Identity entries for any (id, version) pair not
+        // already represented above. Synthesized events carry empty
+        // parents: build time's real parent chain is unrecoverable once
+        // staging is pruned, but head detection only needs hashes to
+        // match up — a later staged v2 with `parents=[v1.hash]` still
+        // correctly demotes the synthesized v1 from head to ancestor.
+        ingest_root_kinographs(&kinora_root, &mut by_id)?;
 
         let identities: HashMap<String, Identity> = by_id
             .into_iter()
@@ -269,6 +290,99 @@ impl Resolver {
             [only] => Ok(Some((*only).clone())),
             _ => Ok(None),
         }
+    }
+}
+
+/// Walk `.kinora/roots/` pointer files and synthesize identity entries from
+/// each committed root kinograph's entries. Only (id, version) pairs that
+/// aren't already represented in `by_id` are added — staged events win on
+/// conflict because they carry authentic parents, timestamps, and authors.
+///
+/// Returns early when the roots dir is absent (e.g. a fresh `kinora init`
+/// before any commit has run) — this is the common case and not an error.
+fn ingest_root_kinographs(
+    kinora_root: &std::path::Path,
+    by_id: &mut BTreeMap<String, Vec<(String, Event)>>,
+) -> Result<(), ResolveError> {
+    let roots_path = roots_dir(kinora_root);
+    let dir_iter = match std::fs::read_dir(&roots_path) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+
+    let existing_id_version: HashSet<(String, String)> = by_id
+        .iter()
+        .flat_map(|(_, events)| events.iter().map(|(_, e)| (e.id.clone(), e.hash.clone())))
+        .collect();
+
+    let store = ContentStore::new(kinora_root);
+    for entry in dir_iter {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        // Skip `.<name>.tmp` atomic-rename sidecars.
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let Some(root_hash) = read_root_pointer_local(kinora_root, name_str)? else {
+            continue;
+        };
+        let bytes = store.read(&root_hash)?;
+        let kg = RootKinograph::parse(&bytes)?;
+        for re in kg.entries {
+            if existing_id_version.contains(&(re.id.clone(), re.version.clone())) {
+                continue;
+            }
+            let lineage = Hash::from_str(&re.version)
+                .map(|h| h.shorthash().to_owned())
+                .unwrap_or_else(|_| "?".to_owned());
+            let synth = Event::new_store(
+                re.kind,
+                re.id.clone(),
+                re.version,
+                vec![],
+                String::new(),
+                String::new(),
+                String::new(),
+                re.metadata,
+            );
+            by_id
+                .entry(re.id.clone())
+                .or_default()
+                .push((lineage, synth));
+        }
+    }
+    Ok(())
+}
+
+/// Read a root pointer file for the kinograph pass. Mirrors the logic in
+/// `commit::read_root_pointer`, inlined here to avoid a type cycle between
+/// `ResolveError` and `CommitError` (via `KinographError`).
+fn read_root_pointer_local(
+    kinora_root: &std::path::Path,
+    root_name: &str,
+) -> Result<Option<Hash>, ResolveError> {
+    let path = root_pointer_path(kinora_root, root_name);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => {
+            let trimmed = body.trim_end_matches(['\r', '\n']);
+            let hash = Hash::from_str(trimmed).map_err(|_| {
+                ResolveError::InvalidRootPointer {
+                    path: path.clone(),
+                    body: body.clone(),
+                }
+            })?;
+            Ok(Some(hash))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 

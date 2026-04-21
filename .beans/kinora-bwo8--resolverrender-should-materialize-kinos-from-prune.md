@@ -5,7 +5,7 @@ status: in-progress
 type: bug
 priority: high
 created_at: 2026-04-21T01:30:43Z
-updated_at: 2026-04-21T01:42:10Z
+updated_at: 2026-04-21T01:45:26Z
 blocked_by:
     - kinora-bayr
 ---
@@ -27,8 +27,8 @@ Resolver::load should also ingest root kinographs: for each (id, version) pair i
 ## Plan
 
 - [x] Write failing tests (bwo8 kinograph-ingestion tests in resolve.rs)
-- [ ] Extend Resolver::load with a third pass: walk roots/, read each root kinograph blob, synthesize Identity entries from (id, version, kind, metadata) when no staged event already covers (id, version)
-- [ ] Verify the new tests pass
-- [ ] Revert bayr's Never→keep-last-10 workarounds in render.rs and commit.rs (at least the ones that are about policy-as-no-op-placeholder)
-- [ ] Zero warnings; full workspace tests pass
+- [x] Extend Resolver::load with a third pass: walk roots/, read each root kinograph blob, synthesize Identity entries from (id, version, kind, metadata) when no staged event already covers (id, version)
+- [x] Verify the new tests pass
+- [x] Revert bayr's Never→keep-last-10 workarounds in render.rs (commit.rs workarounds are about pin/cross-root semantics; clone.rs is about assign events; neither bwo8-relevant)
+- [x] Zero warnings; full workspace tests pass (502 tests: 386 kinora + 116 kinora-cli)
 - [ ] Code review subagent
