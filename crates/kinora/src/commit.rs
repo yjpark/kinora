@@ -782,16 +782,18 @@ fn commit_root_with_refs(
         drop_staged_events(kinora_root, &archived_hashes)?;
     }
 
-    // commits root under Never: drop its owned staged events (archive
-    // store events + the archive-assigns that routed them here). Without
-    // this, every per-root commit would leak one archive + assign pair
-    // into staging forever, even though the commits kinograph already
-    // records them. Must drop ALL owned events (not just archive-assigns):
-    // otherwise an orphaned archive store event would default-route to
-    // inbox on a later commit, leaking the archive into inbox's view.
+    // commits root under Never/MaxAge: drop its owned staged events
+    // (archive store events + the archive-assigns that routed them here).
+    // Without this, every per-root commit would leak one archive + assign
+    // pair into staging forever, even though the commits kinograph
+    // already records them. Must drop ALL owned events (not just
+    // archive-assigns): otherwise an orphaned archive store event would
+    // default-route to inbox on a later commit, leaking the archive into
+    // inbox's view. KeepLastN on commits would still drain here since
+    // archives must never stay in staging beyond the current commit.
     if root_name == COMMITS_ROOT
         && result.new_version.is_some()
-        && matches!(policy, RootPolicy::Never)
+        && matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
     {
         let owned = collect_owned_staged_events(events, root_name, declared_roots)?;
         let owned_hashes: Vec<Hash> = owned
@@ -811,7 +813,6 @@ fn commit_root_with_refs(
         declared_roots,
         &root,
         &policy,
-        &params.ts,
         &implicit_pinned,
     )?;
 
@@ -1090,17 +1091,17 @@ fn prune_staged_events(
     declared_roots: &BTreeSet<String>,
     root: &RootKinograph,
     policy: &RootPolicy,
-    now: &str,
     implicit_pinned: &BTreeSet<(String, String)>,
 ) -> Result<(), CommitError> {
     // MaxAge retention now lives on the root kinograph (via
     // `apply_root_entry_gc` + `head_ts`). Never+MaxAge drain archived
     // events from staging post-archive, so staging-side pruning is both
     // unnecessary and incorrect (it would prune events that haven't been
-    // archived yet). Only KeepLastN still runs here.
-    if matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_)) {
+    // archived yet). Only KeepLastN still runs here — it keeps N versions
+    // per kino in staging and so relies on staging retention.
+    let RootPolicy::KeepLastN(n) = policy else {
         return Ok(());
-    }
+    };
 
     // Explicitly pinned versions from this root's kinograph (content
     // hashes). Cross-root implicit pins are handled separately below
@@ -1125,14 +1126,8 @@ fn prune_staged_events(
     // Pre-index: for each kino id routed to this root, the set of its
     // store events (ordered by ts for KeepLastN).
     let mut owned_stores_by_id: BTreeMap<String, Vec<&Event>> = BTreeMap::new();
-    let mut owned_assigns: Vec<&Event> = Vec::new();
     for e in events {
         if e.event_kind == EVENT_KIND_ASSIGN {
-            if let Ok(a) = AssignEvent::from_event(e)
-                && a.target_root == root_name
-            {
-                owned_assigns.push(e);
-            }
             continue;
         }
         if !e.is_store_event() || e.kind == "root" {
@@ -1147,86 +1142,22 @@ fn prune_staged_events(
 
     let mut drop_hashes: BTreeSet<Hash> = BTreeSet::new();
 
-    match policy {
-        RootPolicy::Never => unreachable!(),
-        RootPolicy::MaxAge(_) => {
-            let Some(max_age_s) = policy.max_age_seconds() else {
-                return Ok(());
-            };
-            let now_ts = parse_ts(now)?;
-            let cutoff = now_ts - max_age_s;
-            // Store events: drop if older than cutoff AND not pinned
-            // (explicit or cross-root implicit).
-            for group in owned_stores_by_id.values() {
-                for e in group {
-                    if pinned_versions.contains(e.hash.as_str()) {
-                        continue;
-                    }
-                    if is_implicit_pinned(&e.id, &e.hash) {
-                        continue;
-                    }
-                    let ts = match parse_ts(&e.ts) {
-                        Ok(t) => t,
-                        Err(err) => {
-                            log::warn!(
-                                target: "kinora::commit::prune",
-                                root = root_name,
-                                kino_id = e.id.as_str(),
-                                hash = e.hash.as_str(),
-                                ts = e.ts.as_str(),
-                                error:% = err;
-                                "store event: unparseable ts; keeping event",
-                            );
-                            continue;
-                        }
-                    };
-                    if ts < cutoff {
-                        drop_hashes.insert(e.event_hash()?);
-                    }
-                }
+    // Per kino id: sort store events by ts desc, keep the N newest; mark
+    // the remainder for drop unless they are pinned versions. Assigns
+    // are NOT touched by KeepLastN (policy acts on store versions only).
+    for (_, mut group) in owned_stores_by_id {
+        group.sort_by(|a, b| b.ts.cmp(&a.ts));
+        for (idx, e) in group.iter().enumerate() {
+            if idx < *n {
+                continue;
             }
-            // Assigns: age-based only, no pin protection (assigns aren't
-            // pin-addressable — pins name store-event content hashes).
-            for e in &owned_assigns {
-                let ts = match parse_ts(&e.ts) {
-                    Ok(t) => t,
-                    Err(err) => {
-                        log::warn!(
-                            target: "kinora::commit::prune",
-                            root = root_name,
-                            hash = e.hash.as_str(),
-                            ts = e.ts.as_str(),
-                            error:% = err;
-                            "assign event: unparseable ts; keeping event",
-                        );
-                        continue;
-                    }
-                };
-                if ts < cutoff {
-                    drop_hashes.insert(e.event_hash()?);
-                }
+            if pinned_versions.contains(e.hash.as_str()) {
+                continue;
             }
-        }
-        RootPolicy::KeepLastN(n) => {
-            // Per kino id: sort store events by ts desc, keep the N newest;
-            // mark the remainder for drop unless they are pinned versions.
-            // Assigns are NOT touched by KeepLastN (policy acts on store
-            // versions only).
-            for (_, mut group) in owned_stores_by_id {
-                group.sort_by(|a, b| b.ts.cmp(&a.ts));
-                for (idx, e) in group.iter().enumerate() {
-                    if idx < *n {
-                        continue;
-                    }
-                    if pinned_versions.contains(e.hash.as_str()) {
-                        continue;
-                    }
-                    if is_implicit_pinned(&e.id, &e.hash) {
-                        continue;
-                    }
-                    drop_hashes.insert(e.event_hash()?);
-                }
+            if is_implicit_pinned(&e.id, &e.hash) {
+                continue;
             }
+            drop_hashes.insert(e.event_hash()?);
         }
     }
 

@@ -280,7 +280,13 @@ pub fn reformat_repo(
         });
 
         // Recurse into composition entries so nested kinographs also get
-        // reformatted in the same pass.
+        // reformatted in the same pass. When a nested entry's store
+        // event is neither staged nor surfaced by any root kinograph
+        // (archived-only, nested-only), `pick_head` on the next loop
+        // iteration will find nothing in `events_by_id` and silently
+        // skip. That's a pre-existing gap — reformat is best-effort on
+        // post-archive graphs, and the next commit will pick up any
+        // unreformatted bytes on a later pass.
         for entry in &kg.entries {
             if !visited.contains(&entry.id) {
                 to_visit.push(entry.id.clone());
