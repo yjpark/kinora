@@ -1,11 +1,11 @@
 ---
 # kinora-et1t
 title: 'Self-contained root kinograph: commit metadata in header line'
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-04-21T15:21:11Z
-updated_at: 2026-04-21T16:23:57Z
+updated_at: 2026-04-21T16:32:45Z
 ---
 
 ## Context
@@ -94,3 +94,22 @@ How is the lineage id generated on genesis? Two options:
 - **B**: Derive from the root name deterministically (e.g., `blake3("root:" + name)`). Independent of content; two repos with the same root name get the same lineage id.
 
 **Resolved: A.** Genesis header's `id` = hash of entries-only bytes (excluding header line). Subsequent headers carry that id forward unchanged. Parser treats id as informational (doesn't re-verify against content).
+
+## Summary of Changes
+
+- `RootHeader { kind: "root", id, parents, ts, author, provenance }` is now line 1 of every root styxl blob. `kind` is the parse discriminator that keeps entry lines from being read as headers on legacy input.
+- `RootKinograph::new_genesis` / `new_child` are the canonical constructors for new root versions. Genesis derives the lineage id from `hash(entries-only canonical bytes)`; `new_child` carries that id forward and records prior blob hashes in `parents`.
+- `commit_root_with_refs` builds the header from the commit's author/provenance/ts, writes the blob via the content store, and updates the `roots/<name>` pointer directly. No `kind:root` staged event is written — `.kinora/staged/` is now purely pending content/assign events. Post-commit+repack, `staged/` is empty (pinned by a new `repack.rs` test).
+- Hard cutover: legacy styx-wrapped and header-less styxl root blobs no longer parse. `reformat.rs` Step 1 (legacy root rewrite) and the `PriorRootEventMissing` error are both gone. Step 2 (kinograph reformat) stays — that's orthogonal content migration.
+- CLI `kinora reformat` summary no longer reports root counts. CLI doc string updated.
+- Tests: header roundtrip, genesis/child lineage, multi-parent headers, 3-version lineage-id stability, entries-unchanged no-op (pre-existing), empty-genesis no-op (pre-existing), repack zero-staged-events, and `WrongHeaderKind` rejection on header-less blobs.
+
+### Commits
+
+- `4e80bf5` refactor(root): inline commit metadata in root kinograph header
+- `b64f6cf` test(repack): assert staged/ is empty after commit+repack
+- `7e79803` fix(root): enforce header discriminator; cover lineage+cutover edge cases
+
+### Follow-up
+
+Users of pre-et1t repos (including this repo's own `.kinora/`) must nuke and rebuild: `rm -rf .kinora/ && kinora init && <re-store>`. No migration code.
