@@ -282,9 +282,11 @@ fn parse_hash(value: &str) -> Result<Hash, ResolveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assign::{write_assign, AssignEvent};
+    use crate::commit::{commit_root, CommitParams};
     use crate::init::init;
     use crate::kino::{store_kino, StoreKinoParams};
-    use crate::paths::kinora_root;
+    use crate::paths::{config_path, kinora_root};
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, std::path::PathBuf) {
@@ -611,6 +613,162 @@ mod tests {
             !resolver.identities().contains_key(&forged_id),
             "non-store event must not surface as a resolver identity"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // kinora-bwo8: Resolver must also ingest committed root kinographs
+    // so kinos belonging to Never-policy roots (whose staged store events
+    // get pruned after archive) remain resolvable.
+    // ------------------------------------------------------------------
+
+    fn declare_main_never(kin: &std::path::Path) {
+        std::fs::write(
+            config_path(kin),
+            "repo-url \"https://example.com/x.git\"\nroots {\n  main { policy \"never\" }\n}\n",
+        )
+        .unwrap();
+    }
+
+    fn assign_to(kin: &std::path::Path, kino_id: &str, target_root: &str) {
+        write_assign(
+            kin,
+            &AssignEvent {
+                kino_id: kino_id.to_owned(),
+                target_root: target_root.to_owned(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-18T10:00:01Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn commit_main(kin: &std::path::Path) {
+        commit_root(
+            kin,
+            "main",
+            CommitParams {
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-18T10:00:02Z".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolver_materializes_identity_from_committed_never_root_kinograph() {
+        // Under Never policy, commit archives owned staged events and then
+        // prunes them. The root kinograph on-disk is the only surviving
+        // record of (id, version, kind, metadata). Resolver::load must
+        // reconstruct an Identity from it so resolve_by_id still works.
+        let (_t, root) = setup();
+        declare_main_never(&root);
+
+        let stored = store_kino(&root, params("markdown", b"hello", "greet")).unwrap();
+        assign_to(&root, &stored.event.id, "main");
+        commit_main(&root);
+
+        // Confirm the Never-policy prune happened for this kino. (Other
+        // staged events — the root blob itself and commit-archive store
+        // events produced by the commit — intentionally survive.)
+        let staged_for_kino: Vec<_> = Ledger::new(&root)
+            .read_all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.is_store_event() && e.id == stored.event.id)
+            .collect();
+        assert!(
+            staged_for_kino.is_empty(),
+            "Never policy should have pruned owned staged events, got: {staged_for_kino:?}"
+        );
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(&stored.event.id).unwrap();
+        assert_eq!(resolved.content, b"hello");
+        assert_eq!(resolved.id, stored.event.id);
+        assert_eq!(resolved.head.hash, stored.event.hash);
+    }
+
+    #[test]
+    fn resolver_resolves_by_name_after_never_prune() {
+        // Name-based lookup (via metadata on the head) must still work
+        // after Never-policy prune — the kinograph entry carries metadata.
+        let (_t, root) = setup();
+        declare_main_never(&root);
+
+        let stored = store_kino(&root, params("markdown", b"doc-body", "my-doc")).unwrap();
+        assign_to(&root, &stored.event.id, "main");
+        commit_main(&root);
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_name("my-doc").unwrap();
+        assert_eq!(resolved.content, b"doc-body");
+        assert_eq!(resolved.id, stored.event.id);
+    }
+
+    #[test]
+    fn resolver_dedups_identity_when_entry_exists_in_both_staged_and_kinograph() {
+        // Belt-and-suspenders: if a staged event and a kinograph entry
+        // both describe the same (id, version), we must materialize the
+        // identity exactly once (not two duplicate heads).
+        let (_t, root) = setup();
+        // Use keep-last-10 so staged events survive the commit, and the
+        // kinograph ALSO lists the same entry — the two sources overlap.
+        std::fs::write(
+            config_path(&root),
+            "repo-url \"https://example.com/x.git\"\nroots {\n  main { policy \"keep-last-10\" }\n}\n",
+        )
+        .unwrap();
+
+        let stored = store_kino(&root, params("markdown", b"hi", "doc")).unwrap();
+        assign_to(&root, &stored.event.id, "main");
+        commit_main(&root);
+
+        let resolver = Resolver::load(&root).unwrap();
+        let identity = resolver
+            .identities()
+            .get(&stored.event.id)
+            .expect("identity should be present");
+        assert_eq!(identity.events.len(), 1, "duplicate entry not deduped");
+        assert_eq!(identity.heads.len(), 1);
+    }
+
+    #[test]
+    fn resolver_chains_new_staged_version_onto_pruned_kinograph_birth() {
+        // v1 is committed under Never → staged v1 pruned, kinograph lists v1.
+        // Stage v2 with parents=[v1.hash]. Resolver must:
+        //   - synthesize v1 from kinograph (empty parents)
+        //   - see v2 from staged (parents=[v1.hash])
+        //   - conclude v2 is the sole head (v1 referenced by v2)
+        let (_t, root) = setup();
+        declare_main_never(&root);
+
+        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+        assign_to(&root, &v1.event.id, "main");
+        commit_main(&root);
+
+        // Stage v2 referencing v1.
+        let mut p = params("markdown", b"v2", "doc");
+        p.id = Some(v1.event.id.clone());
+        p.parents = vec![v1.event.hash.clone()];
+        p.ts = "2026-04-18T10:00:05Z".into();
+        let v2 = store_kino(&root, p).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let identity = resolver
+            .identities()
+            .get(&v1.event.id)
+            .expect("identity present");
+        // v1 was pruned from staging but materialized from kinograph;
+        // v2 came in fresh from staging. Both must appear.
+        assert_eq!(identity.events.len(), 2, "v1 kinograph entry not materialized");
+        let resolved = resolver.resolve_by_id(&v1.event.id).unwrap();
+        assert_eq!(resolved.content, b"v2");
+        assert_eq!(resolved.head.hash, v2.event.hash);
+        // Only v2 should be a head; v1 survives as a non-head entry.
+        assert_eq!(resolved.all_heads.len(), 1);
     }
 
     #[test]

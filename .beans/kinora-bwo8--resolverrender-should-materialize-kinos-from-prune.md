@@ -1,11 +1,11 @@
 ---
 # kinora-bwo8
 title: Resolver/render should materialize kinos from pruned Never-policy roots
-status: todo
+status: in-progress
 type: bug
 priority: high
 created_at: 2026-04-21T01:30:43Z
-updated_at: 2026-04-21T01:30:43Z
+updated_at: 2026-04-21T01:42:10Z
 blocked_by:
     - kinora-bayr
 ---
@@ -23,3 +23,12 @@ Resolver::load should also ingest root kinographs: for each (id, version) pair i
 - resolve_by_id works after Never commit with store events pruned
 - render_committed_main_groups_under_main with policy "never" (the original test intent)
 - integration: commit main (Never) → resolve → render all succeed end-to-end
+
+## Plan
+
+- [x] Write failing tests (bwo8 kinograph-ingestion tests in resolve.rs)
+- [ ] Extend Resolver::load with a third pass: walk roots/, read each root kinograph blob, synthesize Identity entries from (id, version, kind, metadata) when no staged event already covers (id, version)
+- [ ] Verify the new tests pass
+- [ ] Revert bayr's Never→keep-last-10 workarounds in render.rs and commit.rs (at least the ones that are about policy-as-no-op-placeholder)
+- [ ] Zero warnings; full workspace tests pass
+- [ ] Code review subagent
