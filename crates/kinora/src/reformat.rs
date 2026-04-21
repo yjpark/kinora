@@ -239,7 +239,9 @@ pub fn reformat_repo(
         // Nested-pin fallback: if the id isn't in `events_by_id` (drained
         // + not a root entry), try to synthesize from the pin/version
         // hint. Only kinograph-shaped content is useful here — opaque
-        // blobs are left alone.
+        // blobs (markdown, text, binary) fall through to silent skip.
+        // Reaped archive blobs (NotFound) also fall through; other store
+        // errors (corruption, io) propagate.
         if !events_by_id.contains_key(&id)
             && let Some(hint_hex) = &hint
         {
@@ -247,20 +249,24 @@ pub fn reformat_repo(
                 value: hint_hex.clone(),
                 err,
             })?;
-            if let Ok(content) = store.read(&hint_hash)
-                && Kinograph::parse(&content).is_ok()
-            {
-                let synth = Event::new_store(
-                    "kinograph".into(),
-                    id.clone(),
-                    hint_hex.clone(),
-                    vec![],
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    BTreeMap::new(),
-                );
-                events_by_id.insert(id.clone(), vec![synth]);
+            match store.read(&hint_hash) {
+                Ok(content) => {
+                    if Kinograph::parse(&content).is_ok() {
+                        let synth = Event::new_store(
+                            "kinograph".into(),
+                            id.clone(),
+                            hint_hex.clone(),
+                            vec![],
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            BTreeMap::new(),
+                        );
+                        events_by_id.insert(id.clone(), vec![synth]);
+                    }
+                }
+                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(ReformatError::Store(e)),
             }
         }
         let Some(group) = events_by_id.get(&id) else {
@@ -863,6 +869,108 @@ mod tests {
                 new_bytes,
             );
         }
+    }
+
+    #[test]
+    fn reformat_silently_skips_nested_entry_without_pin_when_drained() {
+        use crate::paths::staged_event_path;
+
+        let (_t, root) = setup();
+
+        // Inner legacy kinograph (will be drained from staging), outer
+        // legacy kinograph composing inner WITH NO pin. Without a
+        // version hint, reformat has nothing to synthesize from, so the
+        // inner must silently skip — not error.
+        let leaf = store_md(&root, b"leaf", "leaf", "2026-04-21T10:00:00Z");
+        let inner = store_legacy_kinograph(
+            &root,
+            std::slice::from_ref(&leaf.id),
+            "inner",
+            "2026-04-21T10:00:01Z",
+        );
+        let outer = store_legacy_kinograph(
+            &root,
+            std::slice::from_ref(&inner.id),
+            "outer",
+            "2026-04-21T10:00:02Z",
+        );
+
+        // Root kg surfaces only outer.
+        let outer_hash = Hash::from_str(&outer.hash).unwrap();
+        let entries = vec![crate::root::RootEntry::new(
+            outer.id.clone(),
+            outer_hash.as_hex(),
+            "kinograph",
+            BTreeMap::from([("name".into(), "outer".into())]),
+            "2026-04-21T10:00:02Z",
+        )];
+        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
+
+        // Drain inner + leaf from staging.
+        fs::remove_file(staged_event_path(&root, &inner.event_hash().unwrap())).unwrap();
+        fs::remove_file(staged_event_path(&root, &leaf.event_hash().unwrap())).unwrap();
+
+        let report =
+            reformat_repo(&root, reformat_params("2026-04-21T10:00:04Z")).unwrap();
+
+        let ids: Vec<&str> = report
+            .reformatted_kinographs
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![outer.id.as_str()],
+            "only outer should reformat; inner has no pin hint and must silently skip: {report:#?}",
+        );
+    }
+
+    #[test]
+    fn reformat_silently_skips_nested_pin_pointing_at_non_kinograph_content() {
+        use crate::paths::staged_event_path;
+
+        let (_t, root) = setup();
+
+        // Construct a kinograph that composes a markdown entry with
+        // pin=markdown_hash. This is unusual (normally compositions
+        // point at kinograph ids) but the synth-from-hint branch must
+        // not blindly synthesize a kinograph stub — markdown bytes
+        // won't parse as a kinograph.
+        let md = store_md(&root, b"plain body", "body", "2026-04-21T10:00:00Z");
+        let outer = store_legacy_kinograph_pinned(
+            &root,
+            &md.id,
+            &md.hash,
+            "outer",
+            "2026-04-21T10:00:01Z",
+        );
+
+        let outer_hash = Hash::from_str(&outer.hash).unwrap();
+        let entries = vec![crate::root::RootEntry::new(
+            outer.id.clone(),
+            outer_hash.as_hex(),
+            "kinograph",
+            BTreeMap::from([("name".into(), "outer".into())]),
+            "2026-04-21T10:00:01Z",
+        )];
+        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:02Z");
+
+        // Drain md from staging so it isn't in `events_by_id`.
+        fs::remove_file(staged_event_path(&root, &md.event_hash().unwrap())).unwrap();
+
+        let report =
+            reformat_repo(&root, reformat_params("2026-04-21T10:00:03Z")).unwrap();
+
+        let ids: Vec<&str> = report
+            .reformatted_kinographs
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![outer.id.as_str()],
+            "only outer should reformat; pin points at non-kinograph content and must not synth: {report:#?}",
+        );
     }
 
     #[test]
