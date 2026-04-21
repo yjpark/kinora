@@ -411,6 +411,7 @@ pub fn build_root(
     events: &[Event],
     root_name: &str,
     declared_roots: &BTreeSet<String>,
+    prior_root: Option<&RootKinograph>,
 ) -> Result<RootKinograph, CommitError> {
     let live_assigns = collect_live_assigns(events)?;
 
@@ -440,6 +441,12 @@ pub fn build_root(
             head.metadata.clone(),
         ));
     }
+
+    // Stub: `prior_root` will be consumed by a forthcoming merge step
+    // that carries entries forward when their store events have been
+    // pruned. Kept as a parameter now so callers can settle on the
+    // signature.
+    let _ = prior_root;
 
     Ok(RootKinograph { entries })
 }
@@ -603,18 +610,19 @@ fn commit_root_with_refs(
         .cloned()
         .unwrap_or(RootPolicy::Never);
 
-    let mut root = build_root(events, root_name, declared_roots)?;
-
     // Load prior root kinograph (if any) so we can carry pinned entries
     // forward. Pinned entries survive rebuilds verbatim for kinos still
     // owned by this root — this preserves hand-edits to the pin/version
-    // fields across commits.
+    // fields across commits. Loaded before `build_root` so the merge
+    // step can pick up entries whose store events have been pruned.
     let prior_root: Option<RootKinograph> = match &prior_version {
         Some(h) => Some(RootKinograph::parse(
             &ContentStore::new(kinora_root).read(h)?,
         )?),
         None => None,
     };
+
+    let mut root = build_root(events, root_name, declared_roots, prior_root.as_ref())?;
     propagate_pins(&mut root, prior_root.as_ref());
 
     let implicit_pinned = refs.implicit_pinned_versions(root_name);
@@ -1587,7 +1595,7 @@ mod tests {
         let a = make(&"aa".repeat(32), vec!["bb".repeat(32)]);
         let b = make(&"bb".repeat(32), vec!["aa".repeat(32)]);
         let declared: BTreeSet<String> = BTreeSet::from(["inbox".to_owned()]);
-        let err = build_root(&[a, b], "inbox", &declared).unwrap_err();
+        let err = build_root(&[a, b], "inbox", &declared, None).unwrap_err();
         assert!(matches!(err, CommitError::NoHead { .. }), "got: {err:?}");
     }
 
@@ -3125,5 +3133,277 @@ roots {
             1,
             "archive-assign should not duplicate across runs; got: {assigns_to_commits:?}",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // bayr: Never-policy prune + prior-root merge
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn never_policy_drains_owned_staged_events_after_archive() {
+        // Under Never policy, commit must archive the owned events AND
+        // remove them from staging (previously a no-op, causing
+        // unbounded ledger growth).
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+        let k = store_md(&root, b"doc", "doc", "2026-04-19T10:00:00Z");
+        let k_assign_hash =
+            write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
+        let before = Ledger::new(&root).read_all_events().unwrap();
+        let k_assign = before
+            .iter()
+            .find(|e| e.event_hash().unwrap() == k_assign_hash)
+            .cloned()
+            .unwrap();
+        assert!(staged_event_exists(&root, &k));
+        assert!(staged_event_exists(&root, &k_assign));
+
+        commit_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        assert!(
+            !staged_event_exists(&root, &k),
+            "store event must be pruned after Never archive",
+        );
+        assert!(
+            !staged_event_exists(&root, &k_assign),
+            "assign event must be pruned after Never archive",
+        );
+        // The archive store event for the commits root is still live —
+        // only commits' own commit step can drop it.
+        let events_after = Ledger::new(&root).read_all_events().unwrap();
+        assert!(
+            events_after
+                .iter()
+                .any(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND),
+            "archive store event must still be in staging for commits to consume",
+        );
+    }
+
+    #[test]
+    fn commits_root_drains_owned_staged_events_after_commit_all() {
+        // After commit_all, the commits root consumed the archive-assign
+        // and the archive store event. Both should be drained from
+        // staging. The commits kinograph still references the archive
+        // kino by id.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+        let k = store_md(&root, b"doc", "doc", "2026-04-19T10:00:00Z");
+        write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
+
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        let events = Ledger::new(&root).read_all_events().unwrap();
+        let staged_archives: Vec<_> = events
+            .iter()
+            .filter(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
+            .collect();
+        assert!(
+            staged_archives.is_empty(),
+            "archive store events must be pruned; got: {staged_archives:?}",
+        );
+        let staged_commit_assigns: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                if e.event_kind != EVENT_KIND_ASSIGN {
+                    return false;
+                }
+                let Ok(a) = AssignEvent::from_event(e) else {
+                    return false;
+                };
+                a.target_root == COMMITS_ROOT
+            })
+            .collect();
+        assert!(
+            staged_commit_assigns.is_empty(),
+            "archive-assigns must be pruned; got: {staged_commit_assigns:?}",
+        );
+        // Commits kinograph still has the archive entry.
+        let pointer = read_root_pointer(&root, COMMITS_ROOT).unwrap().unwrap();
+        let entries = root_ids(&root, &pointer);
+        assert_eq!(
+            entries.len(),
+            1,
+            "commits kinograph must retain the archive entry",
+        );
+    }
+
+    #[test]
+    fn never_policy_rebuild_preserves_prior_entries_after_prune() {
+        // After Never-policy prune, the next commit (with no new events)
+        // must preserve the prior kinograph's entries via prior_root
+        // merge in build_root.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+        let k = store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
+        write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
+
+        let first = commit_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+        assert_eq!(
+            root_ids(&root, &first.new_version.clone().unwrap()),
+            vec![k.id.clone()],
+        );
+
+        let second =
+            commit_root(&root, "main", params("yj", "2026-04-19T11:00:00Z")).unwrap();
+        assert!(
+            second.new_version.is_none(),
+            "no new events → rebuild must match prior → no-op",
+        );
+        let pointer = read_root_pointer(&root, "main").unwrap().unwrap();
+        assert_eq!(
+            root_ids(&root, &pointer),
+            vec![k.id],
+            "entry must be preserved via prior_root merge",
+        );
+    }
+
+    #[test]
+    fn never_policy_reassign_removes_entry_on_next_rebuild() {
+        // Kino committed to Never root A, pruned, then reassigned to
+        // root B. On next commit of A, the kino must be gone from A's
+        // kinograph — the prior_root merge must respect live reassigns.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+  alt { policy "never" }
+}
+"#,
+        );
+        let k = store_md(&root, b"v", "doc", "2026-04-19T10:00:00Z");
+        write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
+
+        commit_root(&root, "main", params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // The old assign is pruned. A brand-new assign to `alt` is the
+        // only live assign for this kino after pruning.
+        write_assign_for(&root, &k.id, "alt", vec![], "2026-04-19T11:00:00Z");
+
+        let second =
+            commit_root(&root, "main", params("yj", "2026-04-19T11:00:01Z")).unwrap();
+        let new_version = second
+            .new_version
+            .expect("reassignment away should produce a new main version");
+        let ids = root_ids(&root, &new_version);
+        assert!(
+            !ids.contains(&k.id),
+            "reassigned kino must NOT merge back into main: {ids:?}",
+        );
+    }
+
+    #[test]
+    fn build_root_prior_merge_preserves_pinned_entry_with_no_staged_events() {
+        // Unit-level: build_root(&[], …, Some(prior_with_pinned_entry))
+        // must keep the pinned entry intact.
+        let declared: BTreeSet<String> = BTreeSet::from(["main".to_owned()]);
+        let pinned = RootEntry {
+            id: "a".repeat(64),
+            version: "b".repeat(64),
+            kind: "markdown".into(),
+            metadata: BTreeMap::from([("name".into(), "pinned".into())]),
+            note: String::new(),
+            pin: true,
+        };
+        let prior = RootKinograph { entries: vec![pinned.clone()] };
+        let built = build_root(&[], "main", &declared, Some(&prior)).unwrap();
+        assert_eq!(built.entries, vec![pinned]);
+    }
+
+    #[test]
+    fn build_root_prior_merge_respects_live_reassign() {
+        // Prior root has kino X. Staged events contain a live assign
+        // reassigning X to "other". Merge must NOT resurrect X under this
+        // root.
+        let declared: BTreeSet<String> =
+            BTreeSet::from(["main".to_owned(), "other".to_owned()]);
+        let x_id = "a".repeat(64);
+        let prior = RootKinograph {
+            entries: vec![RootEntry::new(
+                x_id.clone(),
+                "b".repeat(64),
+                "markdown",
+                BTreeMap::new(),
+            )],
+        };
+        let reassign = AssignEvent {
+            kino_id: x_id.clone(),
+            target_root: "other".into(),
+            supersedes: vec![],
+            author: "yj".into(),
+            ts: "2026-04-19T11:00:00Z".into(),
+            provenance: "test".into(),
+        }
+        .to_event();
+        let built =
+            build_root(&[reassign], "main", &declared, Some(&prior)).unwrap();
+        assert!(
+            built.entries.is_empty(),
+            "reassigned kino must not merge back: {:?}",
+            built.entries,
+        );
+    }
+
+    #[test]
+    fn build_root_prior_merge_does_not_duplicate_entry_already_in_fresh() {
+        // When both fresh build and prior have the same id, merge must
+        // not add a duplicate — propagate_pins handles pin propagation
+        // for entries in the fresh build.
+        let declared: BTreeSet<String> = BTreeSet::from(["main".to_owned()]);
+        // Store event for X on `main` (default routing, no assign).
+        let x_hash = crate::hash::Hash::of_content(b"x-body");
+        let store = Event::new_store(
+            "markdown".into(),
+            x_hash.as_hex().into(),
+            x_hash.as_hex().into(),
+            vec![],
+            "2026-04-19T10:00:00Z".into(),
+            "yj".into(),
+            "test".into(),
+            BTreeMap::from([("name".into(), "x".into())]),
+        );
+        let declared_with_inbox: BTreeSet<String> =
+            BTreeSet::from(["inbox".to_owned()]);
+        let prior = RootKinograph {
+            entries: vec![RootEntry::new(
+                store.id.clone(),
+                "stale-version",
+                "markdown",
+                BTreeMap::new(),
+            )],
+        };
+        let built = build_root(
+            std::slice::from_ref(&store),
+            "inbox",
+            &declared_with_inbox,
+            Some(&prior),
+        )
+        .unwrap();
+        assert_eq!(built.entries.len(), 1);
+        // Fresh build wins the version, since the prior entry was not pinned.
+        assert_eq!(built.entries[0].version, store.hash);
+        let _ = declared;
     }
 }
