@@ -350,7 +350,7 @@ fn ingest_root_kinographs(
                 re.id.clone(),
                 re.version,
                 vec![],
-                String::new(),
+                re.head_ts,
                 String::new(),
                 String::new(),
                 re.metadata,

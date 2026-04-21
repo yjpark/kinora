@@ -421,6 +421,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_head_ts_defaults_to_empty_on_styxl_parse() {
+        // Legacy styxl blobs predating kinora-0sgr omit `head_ts`. The
+        // `#[facet(default)]` contract must fill it with an empty string
+        // so pre-0sgr repos keep loading.
+        let id = id(1);
+        let version = version_hash(1);
+        let line = format!(
+            "{{id {id}, version {version}, kind markdown, metadata {{name x}}}}"
+        );
+        let r = RootKinograph::parse_styxl(&line).unwrap();
+        assert_eq!(r.entries.len(), 1);
+        assert!(
+            r.entries[0].head_ts.is_empty(),
+            "head_ts should default to empty: got {:?}",
+            r.entries[0].head_ts,
+        );
+    }
+
+    #[test]
     fn note_opt_treats_empty_as_none() {
         let e = sample_entry(1);
         assert_eq!(e.note_opt(), None);

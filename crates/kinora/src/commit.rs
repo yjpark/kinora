@@ -974,6 +974,10 @@ fn propagate_pins(root: &mut RootKinograph, prior: Option<&RootKinograph>) {
         if let Some(prior_entry) = pinned.get(entry.id.as_str()) {
             entry.pin = true;
             entry.version = prior_entry.version.clone();
+            // head_ts must track the version it names — otherwise a pinned
+            // entry would report the *fresh* head's ts while pointing at
+            // the prior version's hash.
+            entry.head_ts = prior_entry.head_ts.clone();
         }
     }
 }
@@ -987,7 +991,6 @@ fn propagate_pins(root: &mut RootKinograph, prior: Option<&RootKinograph>) {
 /// Returns a `referencing-root → count` map listing how many entries were
 /// rescued from GC by an external reference. This report feeds into the
 /// CLI's retention hint.
-#[allow(clippy::too_many_arguments)]
 fn apply_root_entry_gc(
     root: &mut RootKinograph,
     root_name: &str,
@@ -3601,6 +3604,90 @@ roots {
             kg.entries.len(),
             1,
             "entry with empty head_ts must be kept (legacy fallback)",
+        );
+    }
+
+    #[test]
+    fn entry_gc_keeps_entry_when_head_ts_is_unparseable() {
+        // Malformed head_ts (corrupt blob, partial write, etc.) must not
+        // drop an entry — match the conservative keep-on-unverifiable
+        // policy that applied when the same check was against staged events.
+        let entry = RootEntry {
+            id: "a".repeat(64),
+            version: "b".repeat(64),
+            kind: "markdown".into(),
+            metadata: BTreeMap::new(),
+            note: String::new(),
+            pin: false,
+            head_ts: "not-a-timestamp".into(),
+        };
+        let mut kg = RootKinograph { entries: vec![entry] };
+        let policy = RootPolicy::MaxAge("7d".into());
+        let implicit: BTreeSet<(String, String)> = BTreeSet::new();
+        let refs = ExternalRefs::default();
+
+        apply_root_entry_gc(
+            &mut kg,
+            "rfcs",
+            &policy,
+            "2026-04-19T10:00:00Z",
+            &implicit,
+            &refs,
+        )
+        .unwrap();
+
+        assert_eq!(
+            kg.entries.len(),
+            1,
+            "entry with unparseable head_ts must be kept, not dropped",
+        );
+    }
+
+    #[test]
+    fn propagate_pins_keeps_head_ts_paired_with_version() {
+        // When propagate_pins rewinds `entry.version` back to the prior
+        // pinned version, `head_ts` must follow — otherwise the entry
+        // reports the *fresh head's* ts while pointing at the prior
+        // version's hash. That inconsistency would surface to any
+        // downstream consumer (e.g. render via resolve synthesis) that
+        // reads head_ts without first checking pin.
+        let id = "a".repeat(64);
+        let prior_version = "b".repeat(64);
+        let fresh_version = "c".repeat(64);
+        let prior = RootKinograph {
+            entries: vec![RootEntry {
+                id: id.clone(),
+                version: prior_version.clone(),
+                kind: "markdown".into(),
+                metadata: BTreeMap::new(),
+                note: String::new(),
+                pin: true,
+                head_ts: "2026-04-01T00:00:00Z".into(),
+            }],
+        };
+        let mut fresh = RootKinograph {
+            entries: vec![RootEntry {
+                id: id.clone(),
+                version: fresh_version.clone(),
+                kind: "markdown".into(),
+                metadata: BTreeMap::new(),
+                note: String::new(),
+                pin: false,
+                head_ts: "2026-04-10T00:00:00Z".into(),
+            }],
+        };
+
+        propagate_pins(&mut fresh, Some(&prior));
+
+        let entry = &fresh.entries[0];
+        assert!(entry.pin, "pin must propagate");
+        assert_eq!(
+            entry.version, prior_version,
+            "version must rewind to prior pinned version",
+        );
+        assert_eq!(
+            entry.head_ts, "2026-04-01T00:00:00Z",
+            "head_ts must track the pinned version, not the fresh head",
         );
     }
 }
