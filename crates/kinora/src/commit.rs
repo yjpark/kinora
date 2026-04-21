@@ -1387,6 +1387,40 @@ mod tests {
     }
 
     #[test]
+    fn lineage_id_is_stable_across_three_commits() {
+        // Guard against `new_child` ever re-deriving the id from current
+        // entries instead of carrying it forward from the prior blob.
+        let (_t, root) = setup();
+        store_md(&root, b"v1", "a", "2026-04-19T10:00:00Z");
+        let r1 = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:01Z"))
+            .unwrap()
+            .new_version
+            .unwrap();
+
+        store_md(&root, b"v2", "b", "2026-04-19T10:00:02Z");
+        let r2 = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:03Z"))
+            .unwrap()
+            .new_version
+            .unwrap();
+
+        store_md(&root, b"v3", "c", "2026-04-19T10:00:04Z");
+        let r3 = commit_root(&root, "inbox", params("yj", "2026-04-19T10:00:05Z"))
+            .unwrap()
+            .new_version
+            .unwrap();
+
+        let store = ContentStore::new(&root);
+        let rk1 = RootKinograph::parse(&store.read(&r1).unwrap()).unwrap();
+        let rk2 = RootKinograph::parse(&store.read(&r2).unwrap()).unwrap();
+        let rk3 = RootKinograph::parse(&store.read(&r3).unwrap()).unwrap();
+
+        assert_eq!(rk1.header.id, rk2.header.id);
+        assert_eq!(rk2.header.id, rk3.header.id);
+        assert_eq!(rk2.header.parents, vec![r1.as_hex().to_owned()]);
+        assert_eq!(rk3.header.parents, vec![r2.as_hex().to_owned()]);
+    }
+
+    #[test]
     fn commit_is_no_op_when_nothing_new() {
         let (_t, root) = setup();
         store_md(&root, b"one", "only", "2026-04-19T10:00:00Z");

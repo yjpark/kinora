@@ -56,11 +56,16 @@ pub struct RootEntry {
 
 /// Commit-metadata line at the top of every root styxl blob.
 ///
-/// `id` is the lineage id (stable across versions). `parents` lists the
-/// prior version's blob hashes (empty on genesis). `ts`/`author`/
-/// `provenance` capture the commit that produced this version.
-#[derive(Facet, Debug, Clone, PartialEq, Eq, Default)]
+/// `kind` is a fixed discriminator (`"root"`) that distinguishes headers
+/// from entry lines — without it, a legacy header-less blob's first
+/// entry would parse as a header since facet_styx tolerates unknown
+/// fields. `id` is the lineage id (stable across versions). `parents`
+/// lists the prior version's blob hashes (empty on genesis).
+/// `ts`/`author`/`provenance` capture the commit that produced this
+/// version.
+#[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct RootHeader {
+    pub kind: String,
     pub id: String,
     #[facet(default)]
     pub parents: Vec<String>,
@@ -71,6 +76,23 @@ pub struct RootHeader {
     #[facet(default)]
     pub provenance: String,
 }
+
+impl Default for RootHeader {
+    fn default() -> Self {
+        Self {
+            kind: HEADER_KIND.to_owned(),
+            id: String::new(),
+            parents: Vec::new(),
+            ts: String::new(),
+            author: String::new(),
+            provenance: String::new(),
+        }
+    }
+}
+
+/// Fixed value of `RootHeader::kind`. Serves as the parse discriminator
+/// that keeps entry lines from being read as headers on legacy blobs.
+pub const HEADER_KIND: &str = "root";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootKinograph {
@@ -90,6 +112,8 @@ pub enum RootError {
     DuplicateId { idx: usize, id: String },
     #[error("root kinograph is empty (missing header line)")]
     MissingHeader,
+    #[error("root kinograph header has kind={kind:?}, expected {HEADER_KIND:?}")]
+    WrongHeaderKind { kind: String },
 }
 
 impl RootEntry {
@@ -153,7 +177,14 @@ impl RootKinograph {
         provenance: String,
     ) -> Result<Self, RootError> {
         let id = Self::genesis_id(&entries)?;
-        let header = RootHeader { id, parents: vec![], ts, author, provenance };
+        let header = RootHeader {
+            kind: HEADER_KIND.to_owned(),
+            id,
+            parents: vec![],
+            ts,
+            author,
+            provenance,
+        };
         Ok(Self { header, entries })
     }
 
@@ -169,6 +200,7 @@ impl RootKinograph {
         provenance: String,
     ) -> Self {
         let header = RootHeader {
+            kind: HEADER_KIND.to_owned(),
             id: prior_lineage_id,
             parents: parent_blob_hashes,
             ts,
@@ -218,6 +250,9 @@ impl RootKinograph {
             let h: RootHeader = facet_styx::from_str(line).map_err(|e| {
                 RootError::Parse(format!("line {} (header): {e}", idx + 1))
             })?;
+            if h.kind != HEADER_KIND {
+                return Err(RootError::WrongHeaderKind { kind: h.kind });
+            }
             break h;
         };
 
@@ -549,6 +584,7 @@ mod tests {
     #[test]
     fn header_roundtrip_with_entries() {
         let header = RootHeader {
+            kind: HEADER_KIND.to_owned(),
             id: hash_hex(1),
             parents: vec![hash_hex(2)],
             ts: "2026-04-21T12:00:00Z".into(),
@@ -617,6 +653,7 @@ mod tests {
         // Merge commits produce multi-parent headers. Guard the
         // serializer/parser against that shape.
         let header = RootHeader {
+            kind: HEADER_KIND.to_owned(),
             id: hash_hex(1),
             parents: vec![hash_hex(2), hash_hex(3), hash_hex(4)],
             ts: "2026-04-21T12:00:00Z".into(),
@@ -652,14 +689,17 @@ mod tests {
         assert!(matches!(err, RootError::MissingHeader), "got: {err:?}");
     }
 
-    // Hard-cutover aspirations: we'd like pre-et1t blob shapes (header-less
-    // styxl, styx-wrapped) to surface a clean parse error. In practice
-    // facet_styx is tolerant of unknown fields, so a legacy entry line
-    // parses into a partial `RootHeader` (only the `id` field carried
-    // over). That's acceptable: the hard cutover lives at the WRITE side
-    // (we removed `to_styx`, and production paths must go through
-    // `new_genesis`/`new_child`). If a user points new code at a legacy
-    // repo, the subsequent entry-line pass will fail on the first bogus
-    // line, or the partial header will produce non-sensical downstream
-    // state. Either way, the guidance is nuke-and-rebuild.
+    #[test]
+    fn parse_rejects_header_less_blob_via_kind_discriminator() {
+        // Legacy header-less blob: line 1 is an entry. Its `kind` is
+        // `markdown`/`kinograph`/etc., not `root` — the discriminator
+        // check rejects it instead of silently reading the entry as a
+        // partial header.
+        let entry_line = facet_styx::to_string_compact(&sample_entry(1)).unwrap();
+        let err = RootKinograph::parse_styxl(&format!("{entry_line}\n")).unwrap_err();
+        assert!(
+            matches!(err, RootError::WrongHeaderKind { .. }),
+            "expected WrongHeaderKind, got: {err:?}",
+        );
+    }
 }

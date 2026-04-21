@@ -142,10 +142,10 @@ pub enum Command {
 
     /// Migrate legacy `.styx`-wrapped kinograph blobs to the styxl
     /// one-entry-per-line format. Walks reachable kinograph kinos from each
-    /// root's current head, stages new-version events for regular
-    /// kinographs, and rewrites root blobs + pointers in place. Idempotent
-    /// on repos whose blobs are already styxl. Run `kinora commit`
-    /// afterwards to promote the staged versions to heads.
+    /// root's current head and stages new-version events. Idempotent on
+    /// repos whose blobs are already styxl. Run `kinora commit` afterwards
+    /// to promote the staged versions to heads. Root blobs are not
+    /// touched — their format is pinned by the header-first cutover.
     Reformat {
         /// Override author (defaults to `user.name` from git config).
         #[facet(args::named, default)]
