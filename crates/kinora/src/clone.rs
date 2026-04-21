@@ -639,12 +639,15 @@ mod tests {
         // must copy them into dst/staged verbatim so dst's resolver/
         // commit sees the same routing picture.
         let (_t, src) = setup();
-        // Declare a second root so an assign to it is valid.
+        // Declare a second root so an assign to it is valid. keep-last-10
+        // (not Never) so the assign survives in staging through commit_all
+        // — kinora-bayr's Never prune would drop it into the archive blob,
+        // which is orthogonal to what this test covers (clone mechanics).
         let cfg_text = fs::read_to_string(config_path(&src)).unwrap();
         let mut cfg = Config::from_styx(&cfg_text).unwrap();
         cfg.roots.insert(
             "main".into(),
-            crate::config::RootPolicy::Never,
+            crate::config::RootPolicy::KeepLastN(10),
         );
         fs::write(config_path(&src), cfg.to_styx().unwrap()).unwrap();
 

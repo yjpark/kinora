@@ -442,11 +442,28 @@ pub fn build_root(
         ));
     }
 
-    // Stub: `prior_root` will be consumed by a forthcoming merge step
-    // that carries entries forward when their store events have been
-    // pruned. Kept as a parameter now so callers can settle on the
-    // signature.
-    let _ = prior_root;
+    // Merge in prior-root entries that are missing from the fresh build.
+    // Needed for Never-policy roots: their staged events get pruned after
+    // each commit, so a rebuild with no new activity would otherwise lose
+    // every prior entry. Respect live reassigns — if a live assign moves
+    // the kino to a different root, the prior entry is *not* resurrected
+    // under this one. Absence of any live assign means the original assign
+    // was pruned; keep the entry.
+    if let Some(prior) = prior_root {
+        let existing: BTreeSet<String> =
+            entries.iter().map(|e| e.id.clone()).collect();
+        for entry in &prior.entries {
+            if existing.contains(&entry.id) {
+                continue;
+            }
+            let target = kino_target_root(&entry.id, &live_assigns, declared_roots)?;
+            if target.as_deref().is_some_and(|t| t != root_name) {
+                continue;
+            }
+            entries.push(entry.clone());
+        }
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+    }
 
     Ok(RootKinograph { entries })
 }
@@ -622,7 +639,16 @@ fn commit_root_with_refs(
         None => None,
     };
 
-    let mut root = build_root(events, root_name, declared_roots, prior_root.as_ref())?;
+    // Only Never-policy roots get prior-root merge in `build_root`.
+    // MaxAge/KeepLastN keep owned store events in staging until they age
+    // out, so stateless rebuild is correct — feeding prior_root into the
+    // merge would spuriously resurrect entries whose store events were
+    // naturally superseded (e.g. a new version of the same kino defaulted
+    // to inbox because the user didn't reassign it).
+    let merge_source = matches!(policy, RootPolicy::Never)
+        .then_some(prior_root.as_ref())
+        .flatten();
+    let mut root = build_root(events, root_name, declared_roots, merge_source)?;
     propagate_pins(&mut root, prior_root.as_ref());
 
     let implicit_pinned = refs.implicit_pinned_versions(root_name);
@@ -735,14 +761,41 @@ fn commit_root_with_refs(
     // same assign). commits root itself is excluded (its kinograph already
     // lists each archive; an archive-of-archives would just duplicate
     // that record).
-    if root_name != COMMITS_ROOT && result.new_version.is_some() {
-        maybe_archive_owned_events(
+    //
+    // Never-policy roots additionally drop the just-archived events from
+    // staging — provenance is preserved in the archive kino, so keeping
+    // them would only bloat the ledger.
+    if root_name != COMMITS_ROOT
+        && result.new_version.is_some()
+        && let Some((_archive_id, archived_hashes)) = maybe_archive_owned_events(
             kinora_root,
             root_name,
             events,
             declared_roots,
             &params,
-        )?;
+        )?
+        && matches!(policy, RootPolicy::Never)
+    {
+        drop_staged_events(kinora_root, &archived_hashes)?;
+    }
+
+    // commits root under Never: drop its owned staged events (archive
+    // store events + the archive-assigns that routed them here). Without
+    // this, every per-root commit would leak one archive + assign pair
+    // into staging forever, even though the commits kinograph already
+    // records them. Must drop ALL owned events (not just archive-assigns):
+    // otherwise an orphaned archive store event would default-route to
+    // inbox on a later commit, leaking the archive into inbox's view.
+    if root_name == COMMITS_ROOT
+        && result.new_version.is_some()
+        && matches!(policy, RootPolicy::Never)
+    {
+        let owned = collect_owned_staged_events(events, root_name, declared_roots)?;
+        let owned_hashes: Vec<Hash> = owned
+            .iter()
+            .map(|e| e.event_hash())
+            .collect::<Result<_, _>>()?;
+        drop_staged_events(kinora_root, &owned_hashes)?;
     }
 
     // Prune staged events owned by this root per policy. Runs after the pointer
@@ -802,16 +855,18 @@ fn collect_owned_staged_events<'e>(
 ///
 /// Returns `Ok(None)` when the root has no owned events (nothing to
 /// archive — commit produced no new version either, in practice). Returns
-/// `Ok(Some(archive_id))` otherwise. Idempotent: re-running with the same
-/// owned-event set produces the same archive kino id (content-addressed)
-/// and skips writing a duplicate assign.
+/// `Ok(Some((archive_id, archived_hashes)))` otherwise — the caller uses
+/// the hashes to prune the archived events from staging when the root's
+/// policy is `Never`. Idempotent: re-running with the same owned-event
+/// set produces the same archive kino id (content-addressed) and skips
+/// writing a duplicate assign.
 fn maybe_archive_owned_events(
     kinora_root: &Path,
     root_name: &str,
     events: &[Event],
     declared_roots: &BTreeSet<String>,
     params: &CommitParams,
-) -> Result<Option<String>, CommitError> {
+) -> Result<Option<(String, Vec<Hash>)>, CommitError> {
     // The caller only invokes us after a real version bump, so in the
     // happy path `owned_refs` is always non-empty. This guard is a
     // crash-recovery safety net: if a prior run wrote the pointer but
@@ -822,6 +877,10 @@ fn maybe_archive_owned_events(
     if owned_refs.is_empty() {
         return Ok(None);
     }
+    let owned_hashes: Vec<Hash> = owned_refs
+        .iter()
+        .map(|e| e.event_hash())
+        .collect::<Result<_, _>>()?;
     let owned: Vec<Event> = owned_refs.into_iter().cloned().collect();
     let archive_bytes = serialize_archive(&owned)?;
 
@@ -869,7 +928,25 @@ fn maybe_archive_owned_events(
         };
         write_assign(kinora_root, &assign)?;
     }
-    Ok(Some(archive_id))
+    Ok(Some((archive_id, owned_hashes)))
+}
+
+/// Remove the named events from the staged ledger. Tolerates `NotFound`
+/// (idempotent under crash recovery). Called from the Never-policy
+/// post-archive prune path in `commit_root_with_refs`.
+fn drop_staged_events(
+    kinora_root: &Path,
+    hashes: &[Hash],
+) -> Result<(), CommitError> {
+    for h in hashes {
+        let path = staged_event_path(kinora_root, h);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CommitError::Io(e)),
+        }
+    }
+    Ok(())
 }
 
 /// Copy `pin` + `version` from prior root's entries into the freshly built
@@ -1246,6 +1323,7 @@ pub fn commit_all(
 mod tests {
     use super::*;
     use crate::assign::{AssignEvent, EVENT_KIND_ASSIGN};
+    use crate::commit_archive::parse_archive;
     use crate::init::init;
     use crate::kino::{store_kino, StoreKinoParams};
     use crate::paths::kinora_root;
@@ -2008,12 +2086,16 @@ roots {
     #[test]
     fn cross_root_removal_kino_moves_from_main_to_rfcs() {
         let (_t, root) = setup();
+        // keep-last-10 instead of Never: under kinora-bayr Never prunes
+        // after archive, which would drop the kino's store event before
+        // the reassign happens. This test is about cross-root routing,
+        // not prune semantics, so use a policy that holds the ledger.
         write_config(
             &root,
             r#"repo-url "https://example.com/x.git"
 roots {
-  main { policy "never" }
-  rfcs { policy "never" }
+  main { policy "keep-last-10" }
+  rfcs { policy "keep-last-10" }
 }
 "#,
         );
@@ -2358,13 +2440,14 @@ roots {
     #[test]
     fn keep_last_n_pin_on_version_1_survives_plus_three_newest() {
         let (_t, root) = setup();
-        // Start with Never so the first commit materializes every version
-        // without pruning anything — the user can then hand-edit the pin.
+        // Start with keep-last-5 so the first commit materializes every
+        // version without pruning anything (Never would prune-after-archive
+        // under kinora-bayr) — the user can then hand-edit the pin.
         write_config(
             &root,
             r#"repo-url "https://example.com/x.git"
 roots {
-  rfcs { policy "never" }
+  rfcs { policy "keep-last-5" }
 }
 "#,
         );
@@ -2437,12 +2520,16 @@ roots {
     #[test]
     fn pin_in_root_a_is_dropped_when_kino_is_reassigned_to_root_b() {
         let (_t, root) = setup();
+        // keep-last-10 instead of Never: the test is about pin-drop on
+        // cross-root reassign, not about the Never prune path. Never would
+        // drop the kino's store event on rfcs' first commit, leaving
+        // nothing for designs to materialize.
         write_config(
             &root,
             r#"repo-url "https://example.com/x.git"
 roots {
-  rfcs { policy "never" }
-  designs { policy "never" }
+  rfcs { policy "keep-last-10" }
+  designs { policy "keep-last-10" }
 }
 "#,
         );
@@ -2942,22 +3029,34 @@ roots {
         let k = store_md(&root, b"m", "m", "2026-04-19T10:00:00Z");
         write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
 
-        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+        let entries = commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
 
-        // Exactly one archive kino should exist (main's). A second archive
-        // would mean commits tried to archive its own version bump.
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let archive_stores: Vec<_> = events
+        // Exactly one archive entry in the commits kinograph (main's). A
+        // second archive would mean commits tried to archive its own
+        // version bump. kinora-bayr prunes the archive store event from
+        // staging on the commits root's own Never commit, so the proof of
+        // "how many archives got made" lives in the commits kinograph.
+        let commits_version = entries
             .iter()
-            .filter(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
-            .collect();
+            .find(|(n, _)| n == COMMITS_ROOT)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .new_version
+            .clone()
+            .unwrap();
+        let commits_bytes =
+            ContentStore::new(&root).read(&commits_version).unwrap();
+        let commits_kg = RootKinograph::parse(&commits_bytes).unwrap();
         assert_eq!(
-            archive_stores.len(),
+            commits_kg.entries.len(),
             1,
-            "exactly one archive (main's) should exist; got: {archive_stores:?}",
+            "exactly one archive entry (main's) should exist; got: {:?}",
+            commits_kg.entries,
         );
         assert_eq!(
-            archive_stores[0]
+            commits_kg.entries[0]
                 .metadata
                 .get("name")
                 .map(String::as_str),
@@ -2995,19 +3094,28 @@ roots {
             .as_ref()
             .expect("commits should have a version — it consumed an archive-assign");
 
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let archive_id = events
-            .iter()
-            .find(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
-            .map(|e| e.id.clone())
-            .expect("archive kino should be in the ledger");
-
-        let ids = root_ids(&root, commits_version);
+        // Under kinora-bayr the archive store event is pruned from staging
+        // on commits' own Never commit — its presence in the commits
+        // kinograph is the durable record. Assert the kinograph has exactly
+        // one entry and that its content is a commit-archive (by reading
+        // the blob through the content store).
+        let commits_bytes =
+            ContentStore::new(&root).read(commits_version).unwrap();
+        let commits_kg = RootKinograph::parse(&commits_bytes).unwrap();
         assert_eq!(
-            ids,
-            vec![archive_id],
-            "commits kinograph should list only the archive kino",
+            commits_kg.entries.len(),
+            1,
+            "commits kinograph should list exactly one archive entry; got: {:?}",
+            commits_kg.entries,
         );
+        let entry = &commits_kg.entries[0];
+        let entry_version = Hash::from_str(&entry.version).unwrap();
+        let archive_bytes =
+            ContentStore::new(&root).read(&entry_version).unwrap();
+        // parse_archive confirms the entry points at a valid commit-archive
+        // kino; if this fails we promoted something unexpected into commits.
+        parse_archive(&archive_bytes)
+            .expect("commits entry should point at a valid commit-archive");
     }
 
     #[test]
@@ -3035,49 +3143,40 @@ roots {
         write_assign_for(&root, &k2.id, "main", vec![], "2026-04-19T11:00:01Z");
         let entries = commit_all(&root, params("yj", "2026-04-19T11:00:02Z")).unwrap();
 
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let archive_stores: Vec<_> = events
-            .iter()
-            .filter(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
-            .collect();
-        assert_eq!(
-            archive_stores.len(),
-            2,
-            "two runs with new activity should produce two archives; got: {archive_stores:?}",
-        );
-
-        // Each archive has its own live assign into commits.
-        let archive_ids: std::collections::HashSet<_> =
-            archive_stores.iter().map(|e| e.id.clone()).collect();
-        let assigns_to_commits: Vec<_> = events
-            .iter()
-            .filter(|e| {
-                if e.event_kind != EVENT_KIND_ASSIGN {
-                    return false;
-                }
-                let Ok(a) = AssignEvent::from_event(e) else {
-                    return false;
-                };
-                a.target_root == COMMITS_ROOT && archive_ids.contains(&a.kino_id)
-            })
-            .collect();
-        assert_eq!(assigns_to_commits.len(), 2);
-
-        // The commits kinograph after run 2 lists both archives.
-        let commits_entry = entries
+        // Under kinora-bayr, archive store events + archive-assigns get
+        // pruned from staging once commits ingests them, so the commits
+        // kinograph is the durable record of "how many distinct archives".
+        // Two runs with distinct owned events → two distinct archive ids →
+        // two entries in commits' kinograph.
+        let commits_version = entries
             .iter()
             .find(|(n, _)| n == COMMITS_ROOT)
-            .unwrap();
-        let commits_version = commits_entry
+            .unwrap()
             .1
             .as_ref()
             .unwrap()
             .new_version
-            .as_ref()
+            .clone()
             .unwrap();
+        let commits_bytes =
+            ContentStore::new(&root).read(&commits_version).unwrap();
+        let commits_kg = RootKinograph::parse(&commits_bytes).unwrap();
         let ids: std::collections::HashSet<_> =
-            root_ids(&root, commits_version).into_iter().collect();
-        assert_eq!(ids, archive_ids);
+            commits_kg.entries.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "two runs with new activity should leave two archive entries in commits; got: {:?}",
+            commits_kg.entries,
+        );
+        // Each entry must point at a valid commit-archive blob — the
+        // content-store survives staging prune.
+        for entry in &commits_kg.entries {
+            let v = Hash::from_str(&entry.version).unwrap();
+            let bytes = ContentStore::new(&root).read(&v).unwrap();
+            parse_archive(&bytes)
+                .expect("commits entry should point at a commit-archive blob");
+        }
     }
 
     #[test]
@@ -3098,40 +3197,40 @@ roots {
         let k = store_md(&root, b"doc", "doc", "2026-04-19T10:00:00Z");
         write_assign_for(&root, &k.id, "main", vec![], "2026-04-19T10:00:01Z");
 
-        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+        let first = commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
         // Second commit — no new user events happened, only time passed.
-        commit_all(&root, params("yj", "2026-04-19T11:00:00Z")).unwrap();
+        let second = commit_all(&root, params("yj", "2026-04-19T11:00:00Z")).unwrap();
 
-        let events = Ledger::new(&root).read_all_events().unwrap();
-        let archive_stores: Vec<_> = events
+        // Run 1 produces a commits version with exactly one archive entry.
+        let commits_v1 = first
             .iter()
-            .filter(|e| e.is_store_event() && e.kind == ARCHIVE_CONTENT_KIND)
-            .collect();
-        assert_eq!(
-            archive_stores.len(),
-            1,
-            "archive is content-addressed; re-running shouldn't duplicate it",
-        );
+            .find(|(n, _)| n == COMMITS_ROOT)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .new_version
+            .clone()
+            .unwrap();
+        let bytes_v1 = ContentStore::new(&root).read(&commits_v1).unwrap();
+        let kg_v1 = RootKinograph::parse(&bytes_v1).unwrap();
+        assert_eq!(kg_v1.entries.len(), 1);
 
-        // Exactly one live assign to commits for that archive id. (More
-        // than one would risk AmbiguousAssign on a future commit.)
-        let archive_id = &archive_stores[0].id;
-        let assigns_to_commits: Vec<_> = events
+        // Run 2 — same owned-event set on main (nothing new), same archive
+        // hash. The commits root's rebuild sees no new activity either, so
+        // its pointer must not advance: idempotent.
+        let commits_v2 = second
             .iter()
-            .filter(|e| {
-                if e.event_kind != EVENT_KIND_ASSIGN {
-                    return false;
-                }
-                let Ok(a) = AssignEvent::from_event(e) else {
-                    return false;
-                };
-                a.kino_id == *archive_id && a.target_root == COMMITS_ROOT
-            })
-            .collect();
-        assert_eq!(
-            assigns_to_commits.len(),
-            1,
-            "archive-assign should not duplicate across runs; got: {assigns_to_commits:?}",
+            .find(|(n, _)| n == COMMITS_ROOT)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap()
+            .new_version
+            .clone();
+        assert!(
+            commits_v2.is_none(),
+            "re-running against the same state must not bump commits: got {commits_v2:?}",
         );
     }
 
