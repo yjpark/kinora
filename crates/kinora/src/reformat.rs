@@ -190,8 +190,14 @@ pub fn reformat_repo(
     // kinograph-kind entry ids, and recurse into their heads' composition
     // entries. Reformat each kinograph kino we hit whose content is still
     // legacy-wrapped.
-    let events_by_id = group_store_events_by_id(&events);
+    let mut events_by_id = group_store_events_by_id(&events);
 
+    // Synthesize store-event stubs from root kinograph entries whose
+    // current heads have been archived out of staging (Never/MaxAge
+    // drain). Without this, `pick_head` below would fail to resolve
+    // drained heads. For entries already in staging we keep the staged
+    // event untouched — the staged one is the newer head (reformat staged
+    // a new version, or the user did).
     let mut to_visit: Vec<String> = Vec::new();
     for root_name in config.roots.keys() {
         let Some(hash) = read_root_pointer(kinora_root, root_name)? else {
@@ -202,6 +208,19 @@ pub fn reformat_repo(
         for entry in &root_kg.entries {
             if entry.kind == "kinograph" {
                 to_visit.push(entry.id.clone());
+            }
+            if !events_by_id.contains_key(&entry.id) {
+                let synth = Event::new_store(
+                    entry.kind.clone(),
+                    entry.id.clone(),
+                    entry.version.clone(),
+                    vec![],
+                    entry.head_ts.clone(),
+                    String::new(),
+                    String::new(),
+                    entry.metadata.clone(),
+                );
+                events_by_id.insert(entry.id.clone(), vec![synth]);
             }
         }
     }
@@ -556,17 +575,23 @@ mod tests {
         // nor a new-version event should fire for them.
         assert_eq!(report.reformatted_kinographs.len(), 1);
 
+        // Reformat must not stage any NEW version for md/text. Under
+        // wcpp the originals are archived out of staging (owned by inbox,
+        // drained on commit), so we count reformat-produced additions
+        // rather than total versions visible in staging.
         let events_after = Ledger::new(&root).read_all_events().unwrap();
-        let versions_for_md: Vec<&Event> = events_after
+        let new_md: Vec<&Event> = events_after
             .iter()
-            .filter(|e| e.id == md.id && e.is_store_event())
+            .filter(|e| e.id == md.id && e.is_store_event() && e.hash != md.hash)
             .collect();
-        assert_eq!(versions_for_md.len(), 1, "markdown kino untouched");
-        let versions_for_text: Vec<&Event> = events_after
+        assert!(new_md.is_empty(), "markdown kino untouched");
+        let new_text: Vec<&Event> = events_after
             .iter()
-            .filter(|e| e.id == text_event.id && e.is_store_event())
+            .filter(|e| {
+                e.id == text_event.id && e.is_store_event() && e.hash != text_event.hash
+            })
             .collect();
-        assert_eq!(versions_for_text.len(), 1, "text kino untouched");
+        assert!(new_text.is_empty(), "text kino untouched");
     }
 
     #[test]

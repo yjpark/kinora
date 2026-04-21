@@ -640,13 +640,14 @@ fn commit_root_with_refs(
         None => None,
     };
 
-    // Only Never-policy roots get prior-root merge in `build_root`.
-    // MaxAge/KeepLastN keep owned store events in staging until they age
-    // out, so stateless rebuild is correct — feeding prior_root into the
-    // merge would spuriously resurrect entries whose store events were
-    // naturally superseded (e.g. a new version of the same kino defaulted
-    // to inbox because the user didn't reassign it).
-    let merge_source = matches!(policy, RootPolicy::Never)
+    // Never and MaxAge roots get prior-root merge in `build_root`. After
+    // archival, Never/MaxAge drain their committed events from staging —
+    // so entries surviving across commits must come from prior_root.
+    // MaxAge additionally relies on `apply_root_entry_gc` (driven by
+    // `head_ts` on the entry) to age entries out of the merged result.
+    // KeepLastN retains its entries via staging instead, so feeding
+    // prior_root would spuriously resurrect superseded versions there.
+    let merge_source = matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
         .then_some(prior_root.as_ref())
         .flatten();
     let mut root = build_root(events, root_name, declared_roots, merge_source)?;
@@ -762,9 +763,11 @@ fn commit_root_with_refs(
     // lists each archive; an archive-of-archives would just duplicate
     // that record).
     //
-    // Never-policy roots additionally drop the just-archived events from
-    // staging — provenance is preserved in the archive kino, so keeping
-    // them would only bloat the ledger.
+    // Never and MaxAge roots additionally drop the just-archived events
+    // from staging — provenance is preserved in the archive kino, so
+    // keeping them would only bloat the ledger. MaxAge retention lives
+    // on the root kinograph (via `apply_root_entry_gc` + `head_ts`),
+    // so staging no longer carries the retention signal.
     if root_name != COMMITS_ROOT
         && result.new_version.is_some()
         && let Some((_archive_id, archived_hashes)) = maybe_archive_owned_events(
@@ -774,7 +777,7 @@ fn commit_root_with_refs(
             declared_roots,
             &params,
         )?
-        && matches!(policy, RootPolicy::Never)
+        && matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
     {
         drop_staged_events(kinora_root, &archived_hashes)?;
     }
@@ -1090,7 +1093,12 @@ fn prune_staged_events(
     now: &str,
     implicit_pinned: &BTreeSet<(String, String)>,
 ) -> Result<(), CommitError> {
-    if matches!(policy, RootPolicy::Never) {
+    // MaxAge retention now lives on the root kinograph (via
+    // `apply_root_entry_gc` + `head_ts`). Never+MaxAge drain archived
+    // events from staging post-archive, so staging-side pruning is both
+    // unnecessary and incorrect (it would prune events that haven't been
+    // archived yet). Only KeepLastN still runs here.
+    if matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_)) {
         return Ok(());
     }
 
@@ -2668,11 +2676,11 @@ roots {
             vec![x.id.clone()],
             "inbox-b must NOT drop X — rfcs composes it"
         );
-        // X's store event must also survive the staged prune.
-        assert!(
-            staged_event_exists(&root, &x),
-            "X's staged event must be protected by the external ref"
-        );
+        // Under wcpp, owned events archive + drain on commit — so X's
+        // staged event is gone, but the archive kino preserves it and
+        // the root entry survives via cross-root protection. That's what
+        // integrity means post-wcpp: the entry stays in B's kinograph,
+        // not that the raw event persists in staging.
     }
 
     #[test]
@@ -2732,10 +2740,19 @@ roots {
         )
         .unwrap();
         let _kg_v2 = stored.event;
+        // The kg_v1→rfcs assign was drained on first rfcs commit. Write
+        // a fresh assign so kg_v2 routes to rfcs and rfcs v2 replaces
+        // kg_v1 with kg_v2 (which references Y instead of X).
+        write_assign_for(&root, &kg_v1.id, "rfcs", vec![], "2026-04-15T10:00:01Z");
 
         // Commit both roots again. rfcs now refs Y, not X. X is ONLY
         // owned by inbox-b, 40d old, no cross-root protection → drop.
-        commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        let rfcs2 =
+            commit_root(&root, "rfcs", params("yj", "2026-04-19T12:00:00Z")).unwrap();
+        assert!(
+            rfcs2.new_version.is_some(),
+            "rfcs v2 must advance to kg_v2 (Y ref)"
+        );
         let b_res =
             commit_root(&root, "inbox-b", params("yj", "2026-04-19T12:00:00Z")).unwrap();
         let b_ids = root_ids(&root, &b_res.new_version.unwrap());
