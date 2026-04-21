@@ -716,6 +716,122 @@ mod tests {
         );
     }
 
+    /// Store a legacy-wrapped kinograph with a single composition entry
+    /// carrying a `pin = version` hint. Used to construct the nested-only
+    /// scenario where reformat must resolve the inner kinograph via its
+    /// pin after the inner's store event has been drained from staging.
+    fn store_legacy_kinograph_pinned(
+        root: &Path,
+        entry_id: &str,
+        entry_pin: &str,
+        name: &str,
+        ts: &str,
+    ) -> Event {
+        let k = Kinograph {
+            entries: vec![KinographEntry {
+                id: entry_id.to_owned(),
+                name: String::new(),
+                pin: entry_pin.to_owned(),
+                note: String::new(),
+            }],
+        };
+        let content = k.to_styx().unwrap().into_bytes();
+        assert!(
+            !is_styxl(std::str::from_utf8(&content).unwrap()),
+            "to_styx must emit legacy wrapped form for this test"
+        );
+        let stored = store_kino(
+            root,
+            StoreKinoParams {
+                kind: "kinograph".into(),
+                content,
+                author: "yj".into(),
+                provenance: "reformat-test".into(),
+                ts: ts.into(),
+                metadata: BTreeMap::from([("name".into(), name.into())]),
+                id: None,
+                parents: vec![],
+            },
+        )
+        .unwrap();
+        stored.event
+    }
+
+    #[test]
+    fn reformat_resolves_nested_pin_when_store_event_drained() {
+        use crate::paths::staged_event_path;
+
+        let (_t, root) = setup();
+
+        // Leaf markdown + inner legacy kinograph composing leaf.
+        let leaf = store_md(&root, b"leaf", "leaf", "2026-04-21T10:00:00Z");
+        let inner = store_legacy_kinograph(
+            &root,
+            std::slice::from_ref(&leaf.id),
+            "inner",
+            "2026-04-21T10:00:01Z",
+        );
+
+        // Outer legacy kinograph composing inner WITH pin=inner.hash.
+        // The pin is the hint reformat must use to resolve inner after
+        // its store event is drained from staging.
+        let outer = store_legacy_kinograph_pinned(
+            &root,
+            &inner.id,
+            &inner.hash,
+            "outer",
+            "2026-04-21T10:00:02Z",
+        );
+
+        // Seed a legacy root pointer containing ONLY outer — simulating
+        // a state where inner is not surfaced in any root kinograph.
+        let outer_hash = Hash::from_str(&outer.hash).unwrap();
+        let entries = vec![crate::root::RootEntry::new(
+            outer.id.clone(),
+            outer_hash.as_hex(),
+            "kinograph",
+            BTreeMap::from([("name".into(), "outer".into())]),
+            "2026-04-21T10:00:02Z",
+        )];
+        seed_legacy_root_pointer(&root, "inbox", entries, "2026-04-21T10:00:03Z");
+
+        // Simulate wcpp drain: remove inner's + leaf's staged events so
+        // `events_by_id` won't carry them. Outer's staged event stays
+        // so the root's synth path still works for the top-level entry.
+        let inner_event_hash = inner.event_hash().unwrap();
+        let leaf_event_hash = leaf.event_hash().unwrap();
+        fs::remove_file(staged_event_path(&root, &inner_event_hash)).unwrap();
+        fs::remove_file(staged_event_path(&root, &leaf_event_hash)).unwrap();
+
+        let report =
+            reformat_repo(&root, reformat_params("2026-04-21T10:00:04Z")).unwrap();
+
+        let mut ids: Vec<&str> = report
+            .reformatted_kinographs
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        ids.sort();
+        let mut expected = vec![inner.id.as_str(), outer.id.as_str()];
+        expected.sort();
+        assert_eq!(
+            ids, expected,
+            "both outer and inner should reformat; inner needs synthesis from its pin; got {report:#?}"
+        );
+
+        // Each reformatted kinograph's new blob is in styxl form.
+        for reformatted in &report.reformatted_kinographs {
+            let new_hash = Hash::from_str(&reformatted.new_version).unwrap();
+            let new_bytes = ContentStore::new(&root).read(&new_hash).unwrap();
+            assert!(
+                is_styxl(std::str::from_utf8(&new_bytes).unwrap()),
+                "new blob for {} should be styxl; got {:?}",
+                reformatted.id,
+                new_bytes,
+            );
+        }
+    }
+
     #[test]
     fn reformat_then_commit_makes_new_version_the_head() {
         let (_t, root) = setup();
