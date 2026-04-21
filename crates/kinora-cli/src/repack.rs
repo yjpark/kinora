@@ -59,9 +59,14 @@ pub fn format_repack_summary(r: &RepackRunReport) -> String {
         plural_s(clone.blobs_dropped),
     ));
     out.push_str(&format!(
-        "{} filename{} rewritten",
+        "{} filename{} rewritten\n",
         clone.filenames_rewritten,
         plural_s(clone.filenames_rewritten),
+    ));
+    out.push_str(&format!(
+        "{} orphan staged event{} drained",
+        inner.orphan_events_drained,
+        plural_s(inner.orphan_events_drained),
     ));
     out
 }
@@ -132,6 +137,7 @@ mod tests {
         assert!(s.contains("0 kinos rebuilt"), "got: {s}");
         assert!(s.contains("0 blobs dropped"), "got: {s}");
         assert!(s.contains("0 filenames rewritten"), "got: {s}");
+        assert!(s.contains("0 orphan staged events drained"), "got: {s}");
         assert!(!s.contains("committed root"), "no commits means no commit lines: {s}");
     }
 
@@ -149,6 +155,7 @@ mod tests {
                     blobs_dropped: 1,
                     filenames_rewritten: 1,
                 },
+                orphan_events_drained: 1,
             },
         };
         let s = format_repack_summary(&r);
@@ -156,6 +163,7 @@ mod tests {
         assert!(s.contains("1 kino rebuilt"), "got: {s}");
         assert!(s.contains("1 blob dropped"), "got: {s}");
         assert!(s.contains("1 filename rewritten"), "got: {s}");
+        assert!(s.contains("1 orphan staged event drained"), "got: {s}");
     }
 
     #[test]
@@ -175,6 +183,7 @@ mod tests {
                     },
                 ],
                 clone: CloneReport::default(),
+                orphan_events_drained: 0,
             },
         };
         let s = format_repack_summary(&r);

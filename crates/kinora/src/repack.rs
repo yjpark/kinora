@@ -29,7 +29,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::clone::{clone_repo, CloneError, CloneParams, CloneReport};
-use crate::commit::{commit_all, CommitError, CommitParams, CommitResult};
+use crate::commit::{commit_all, drain_archived_orphans, CommitError, CommitParams, CommitResult};
 use crate::paths::{kinora_root, KINORA_DIR};
 
 pub const TMP_SUFFIX: &str = ".repack-tmp";
@@ -89,6 +89,12 @@ impl RepackCommitEntry {
 pub struct RepackReport {
     pub commits: Vec<RepackCommitEntry>,
     pub clone: CloneReport,
+    /// Staged events dropped by the post-commit orphan-drain pass because
+    /// their hash is already recorded in a `commit-archive` kino for a
+    /// `Never`/`MaxAge` source root. Zero on a clean repo; non-zero when
+    /// wcpp's commit-time drain couldn't catch them (e.g. pre-wcpp
+    /// leftovers, or repos where every subsequent commit is a no-op).
+    pub orphan_events_drained: usize,
 }
 
 /// Run repack against the repo rooted at `repo_root` (the directory
@@ -127,6 +133,12 @@ pub fn repack_repo(
         }
     }
 
+    // Migration-debt cleanup: on no-op commits (and on any commit where
+    // wcpp's drain didn't fire), staged events already recorded in a
+    // commit-archive linger. Drain them before the clone so the rebuilt
+    // `.kinora/` doesn't carry them over.
+    let orphan_events_drained = drain_archived_orphans(&kin_dir)?;
+
     let clone_params = CloneParams {
         author: params.author,
         provenance: params.provenance,
@@ -150,7 +162,7 @@ pub fn repack_repo(
     // swallowing it.
     fs::remove_dir_all(&old_dir)?;
 
-    Ok(RepackReport { commits, clone: clone_report })
+    Ok(RepackReport { commits, clone: clone_report, orphan_events_drained })
 }
 
 /// The two-rename critical section. On rename-2 failure, rolls back

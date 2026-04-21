@@ -25,7 +25,7 @@ use std::str::FromStr;
 
 use crate::assign::{write_assign, AssignError, AssignEvent, EVENT_KIND_ASSIGN};
 use crate::commit_archive::{
-    serialize_archive, ArchiveError, ARCHIVE_CONTENT_KIND,
+    parse_archive, serialize_archive, ArchiveError, ARCHIVE_CONTENT_KIND,
 };
 use crate::config::{Config, ConfigError, RootPolicy};
 use crate::event::{Event, EventError};
@@ -1253,6 +1253,81 @@ pub fn commit_all(
     }
 
     Ok(out)
+}
+
+/// Drain staged events whose hash is already recorded in a `commit-archive`
+/// kino referenced by the `commits` root kinograph, for source roots with
+/// `RootPolicy::Never | MaxAge(_)`.
+///
+/// Migration-debt cleanup: wcpp's post-archive drain only fires when a
+/// commit produces a new version. Repos carrying archived-but-not-drained
+/// staged events (pre-wcpp leftovers, or otherwise quiescent) can't
+/// self-clean via no-op commits. This pass closes that gap — safe because
+/// the archive preserves provenance, and the policy gate leaves
+/// `KeepLastN` staging-based retention alone.
+///
+/// Returns the number of staged event files actually removed. Idempotent:
+/// calling twice is a no-op on the second call.
+#[fastrace::trace]
+pub fn drain_archived_orphans(kinora_root: &Path) -> Result<usize, CommitError> {
+    let cfg_path = config_path(kinora_root);
+    let cfg_text = match fs::read_to_string(&cfg_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(CommitError::Io(e)),
+    };
+    let config = Config::from_styx(&cfg_text)?;
+
+    let Some(commits_ptr) = read_root_pointer(kinora_root, COMMITS_ROOT)? else {
+        return Ok(0);
+    };
+    let store = ContentStore::new(kinora_root);
+    let commits_kg = RootKinograph::parse(&store.read(&commits_ptr)?)?;
+
+    let mut to_drop: Vec<Hash> = Vec::new();
+    for entry in &commits_kg.entries {
+        if entry.kind != ARCHIVE_CONTENT_KIND {
+            continue;
+        }
+        let Some(archive_name) = entry.metadata.get("name") else {
+            continue;
+        };
+        let Some(source_root) = archive_name.strip_suffix("-commit-archive") else {
+            continue;
+        };
+        let Some(policy) = config.roots.get(source_root) else {
+            continue;
+        };
+        if !matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_)) {
+            continue;
+        }
+        let archive_hash = Hash::from_str(&entry.id).map_err(|err| CommitError::InvalidHash {
+            value: entry.id.clone(),
+            err,
+        })?;
+        let archive_bytes = match store.read(&archive_hash) {
+            Ok(b) => b,
+            // Archive blob may have been reaped by an unrelated cleanup —
+            // skip rather than fail, since we can't drain what we can't verify.
+            Err(StoreError::Io(ref e)) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(CommitError::Store(e)),
+        };
+        let (_schema, archive_events) = parse_archive(&archive_bytes)?;
+        for ev in archive_events {
+            to_drop.push(ev.event_hash()?);
+        }
+    }
+
+    let mut dropped = 0;
+    for h in &to_drop {
+        let path = staged_event_path(kinora_root, h);
+        match fs::remove_file(&path) {
+            Ok(()) => dropped += 1,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CommitError::Io(e)),
+        }
+    }
+    Ok(dropped)
 }
 
 #[cfg(test)]
