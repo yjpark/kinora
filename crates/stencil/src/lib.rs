@@ -34,6 +34,8 @@
 //! [`Kinograph`]: kinora::kinograph::Kinograph
 
 pub mod kinds;
+pub mod region;
+pub mod target;
 
 /// Base error type for the stencil library. Follows kinora's convention:
 /// libraries use `thiserror`, the CLI wraps these in `rootcause` reports.
@@ -45,6 +47,8 @@ pub mod kinds;
 pub enum StencilError {
     #[error("stencil io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Parse(#[from] region::ParseError),
     #[error(transparent)]
     Resolve(#[from] kinora::resolve::ResolveError),
     #[error(transparent)]
