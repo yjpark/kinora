@@ -1,0 +1,23 @@
+[package]
+name = "stencil-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "stencil"
+path = "src/main.rs"
+
+[dependencies]
+stencil = { path = "../stencil" }
+facet = { workspace = true }
+fastrace = { workspace = true, features = ["enable"] }
+figue = { workspace = true }
+log = { workspace = true }
+logforth = { workspace = true, features = ["starter-log", "append-fastrace", "diagnostic-fastrace"] }
+rootcause = { workspace = true }
+thiserror = { workspace = true }

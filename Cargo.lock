@@ -2709,6 +2709,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stencil"
+version = "0.0.1"
+dependencies = [
+ "kinora",
+ "rstest",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "stencil-cli"
+version = "0.0.1"
+dependencies = [
+ "facet",
+ "fastrace",
+ "figue",
+ "log",
+ "logforth",
+ "rootcause",
+ "stencil",
+ "thiserror",
+]
+
+[[package]]
 name = "strip-ansi-escapes"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

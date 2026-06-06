@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/kinora",
     "crates/kinora-cli",
+    "crates/stencil",
+    "crates/stencil-cli",
 ]
 
 [workspace.package]
