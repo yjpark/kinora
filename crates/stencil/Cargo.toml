@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 kinora = { path = "../kinora" }
+pulldown-cmark = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -35,6 +35,7 @@
 
 pub mod kinds;
 pub mod region;
+pub mod spec;
 pub mod target;
 
 /// Base error type for the stencil library. Follows kinora's convention:
@@ -49,6 +50,8 @@ pub enum StencilError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Parse(#[from] region::ParseError),
+    #[error(transparent)]
+    Spec(#[from] spec::SpecError),
     #[error(transparent)]
     Resolve(#[from] kinora::resolve::ResolveError),
     #[error(transparent)]
