@@ -33,6 +33,7 @@
 //! [`Resolver`]: kinora::resolve::Resolver
 //! [`Kinograph`]: kinora::kinograph::Kinograph
 
+pub mod engine;
 pub mod kinds;
 pub mod region;
 pub mod spec;
@@ -56,4 +57,12 @@ pub enum StencilError {
     Resolve(#[from] kinora::resolve::ResolveError),
     #[error(transparent)]
     Kinograph(#[from] kinora::kinograph::KinographError),
+    #[error("file declares stencil slots but no `stencil:kinograph` binding")]
+    NoBinding,
+    #[error("binding `{reference}` resolves to kind `{kind}`, not an api-kinograph (`kudo::api-kinograph`)")]
+    NotApiKinograph { reference: String, kind: String },
+    #[error("api-kinograph entry `{name}` resolves to kind `{kind}`, not an api-spec (`kudo::api-spec`)")]
+    NotApiSpec { name: String, kind: String },
+    #[error("api-kinograph has two entries named `{name}`; names must be unique to match slots")]
+    DuplicateEntryName { name: String },
 }
