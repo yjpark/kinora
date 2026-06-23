@@ -2754,10 +2754,12 @@ dependencies = [
  "facet",
  "fastrace",
  "figue",
+ "kinora",
  "log",
  "logforth",
  "rootcause",
  "stencil",
+ "tempfile",
  "thiserror",
 ]
 

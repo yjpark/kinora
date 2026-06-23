@@ -1,6 +1,8 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use cli::{Cli, Command};
+use stencil::target::RustTarget;
 use fastrace::collector::{Config as FastraceConfig, ConsoleReporter, SpanContext};
 use fastrace::Span;
 use logforth::append::{FastraceEvent, Stderr};
@@ -11,6 +13,7 @@ use rootcause::Report;
 
 mod cli;
 mod common;
+mod sync;
 
 fn main() -> ExitCode {
     init_logging();
@@ -56,13 +59,43 @@ fn run() -> ExitCode {
         }
     };
 
-    // The command surface is in place; the engines land in later beans. Each
-    // arm dispatches to its `run_*` once implemented.
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cannot determine current directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let repo_root = match common::resolve_repo_root(
+        &cwd,
+        cli.repo_root.as_deref().map(Path::new),
+    ) {
+        Ok(p) => p,
+        Err(e) => return report_err("repo-root", e),
+    };
+
     match cli.command {
-        Command::Sync { .. } => report_err("sync", common::CliError::NotImplemented { command: "sync" }),
+        Command::Sync { paths } => run_sync_command(&repo_root, &cwd, &paths),
         Command::Scaffold { .. } => {
             report_err("scaffold", common::CliError::NotImplemented { command: "scaffold" })
         }
+    }
+}
+
+/// Drive `stencil sync`: render the bound api-kinograph into the read-only
+/// blocks of the scanned files, print a summary, and select the exit code.
+/// A clean run exits 0; any per-file error or unknown slot exits non-zero.
+fn run_sync_command(repo_root: &Path, cwd: &Path, paths: &[String]) -> ExitCode {
+    match sync::run_sync(repo_root, cwd, paths, &RustTarget) {
+        Ok(summary) => {
+            print!("{}", sync::format_sync_summary(&summary));
+            if summary.has_errors() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => report_err("sync", e),
     }
 }
 
