@@ -1,11 +1,11 @@
 ---
 # kinora-3guj
 title: 'Dogfood: extend stencil api-kinograph to engine/region/spec/kinds/lib'
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-06-23T00:56:17Z
-updated_at: 2026-06-23T01:10:58Z
+updated_at: 2026-06-23T01:15:26Z
 parent: kinora-bm7z
 ---
 
@@ -44,5 +44,20 @@ Resolved open question — **kinograph granularity = per-module/per-file**. The 
 ### Increment 3: region.rs ✓
 - [x] 9 items → stencil-region-api: Block enum (data-carrying variants), StencilFile struct, ParseError enum (whole-item); read_only/to_lines/parse/to_source/binding/slot_names (methods, incl. multi-line read_only signature). sync (9 created); compiles; 72 tests; second sync no-op (the rebuilt parser round-trips its own dogfooded source).
 
-### Remaining modules
-- [ ] engine.rs (9 items — SlotStatus/SlotOutcome/SyncReport/SyncOutcome + sync_file/kinograph_slot_names + SyncReport methods)
+### Increment 4: engine.rs ✓
+- [x] 9 items → stencil-engine-api: SlotStatus enum, SlotOutcome/SyncReport/SyncOutcome structs (whole-item); changed/drifted/unmatched (SyncReport methods) + sync_file/kinograph_slot_names (free fns, multi-line sigs). sync (9 created); compiles; 72 tests; second sync no-op.
+
+## Summary of Changes
+
+Completed the full-crate dogfood: **all 6 stencil modules** (target, spec, kinds, lib, region, engine — 29 public items) are now stencil-managed, rendered from per-module api-kinographs. `stencil sync crates/stencil/src` walks the whole tree, fills every read-only block, and a re-run reports **0 changed** — stencil is fully self-hosting, including the engine that performs the sync.
+
+Per-module api-kinographs (resolved open question — per-file binding avoids unslotted-entry noise):
+- `stencil-target-api` (se7b), `stencil-spec-api`, `stencil-kinds-api`, `stencil-lib-api`, `stencil-region-api`, `stencil-engine-api`.
+
+Convention validated across every Rust item kind: whole-item contracts (struct/enum/trait/const — full definition rendered) and the fn signature/body split (`pub fn f() -> T` read-only, `{ body }` editable), including multi-line signatures (sync_file, read_only) and methods inside impl blocks.
+
+Content-model findings (both handled, no stencil change needed):
+- A definition containing ` ```rust ` (SpecItem field doc) → wrap the spec kino in a **4-backtick fence**; pulldown-cmark + SpecItem::parse render the triple backticks verbatim.
+- A doc whose **prose** contains ` ```rust ` (kinds API_SPEC) → renders fine; the unclosed inline backticks are literal text (the paragraph ends before the real fence).
+
+Verified at every step: crate compiles, 72 stencil tests pass, full workspace green (391+115+72+26), bacon + clippy clean, every module's second sync is a no-op. The dogfood kinos live as staged ledger events (Resolver reads staged); a `kinora commit` would fold them into the inbox root when desired. All git-tracked, not pushed.

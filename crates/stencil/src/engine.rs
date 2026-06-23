@@ -32,6 +32,16 @@ use crate::spec::SpecItem;
 use crate::target::LanguageTarget;
 use crate::StencilError;
 
+// This module's public API is stencil-managed (dogfood, kinora-3guj): the
+// SlotStatus / SlotOutcome / SyncReport / SyncOutcome types and the sync_file /
+// kinograph_slot_names functions render into the read-only blocks below from
+// the `stencil-engine-api` api-kinograph. Run `stencil sync` to refresh them;
+// edit the kinos, not the blocks. Bodies and private helpers stay editable.
+
+// stencil:kinograph stencil-engine-api
+
+// stencil:slot engine-slot-status
+// stencil:ro engine-slot-status 77ae5faa04c9da584039b4292919637201dacc967b62641375b3c4a924bdfa6a
 /// What happened to a single slot's read-only block during a sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotStatus {
@@ -47,14 +57,20 @@ pub enum SlotStatus {
     /// The slot names no entry in the bound api-kinograph; left untouched.
     Unmatched,
 }
+// stencil:end
 
+// stencil:slot engine-slot-outcome
+// stencil:ro engine-slot-outcome bdfd17afebe1ecd909200106d607de381dcedfd247fea7f6f3f2b35f51d0cf96
 /// The outcome for one slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotOutcome {
     pub name: String,
     pub status: SlotStatus,
 }
+// stencil:end
 
+// stencil:slot engine-sync-report
+// stencil:ro engine-sync-report 4457e3b0c104dc01eab3a90bf3000ddde60afcb4b6cf0aadac86486120e980ff
 /// A summary of a single file's sync.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncReport {
@@ -65,11 +81,16 @@ pub struct SyncReport {
     /// Read-only blocks with no owning slot above them (sorted by name).
     pub orphans: Vec<String>,
 }
+// stencil:end
 
 impl SyncReport {
+    // stencil:slot engine-sync-report-changed
+    // stencil:ro engine-sync-report-changed a1d68a81286f5e2ac99423ebc68160242cd9bac19428004b5362da116577aa05
     /// Whether the sync altered the file (any block created, updated, or
     /// drift-overwritten). The CLI writes the file back only when true.
-    pub fn changed(&self) -> bool {
+    pub fn changed(&self) -> bool
+    // stencil:end
+    {
         self.slots.iter().any(|s| {
             matches!(
                 s.status,
@@ -78,8 +99,12 @@ impl SyncReport {
         })
     }
 
+    // stencil:slot engine-sync-report-drifted
+    // stencil:ro engine-sync-report-drifted f2058ed09257e69ed0410f872cd73d08f9fbfe27d7742f40310ec2f5c6a6f395
     /// Names of slots whose read-only regions were hand-edited and overwritten.
-    pub fn drifted(&self) -> Vec<&str> {
+    pub fn drifted(&self) -> Vec<&str>
+    // stencil:end
+    {
         self.slots
             .iter()
             .filter(|s| s.status == SlotStatus::DriftOverwritten)
@@ -87,8 +112,12 @@ impl SyncReport {
             .collect()
     }
 
+    // stencil:slot engine-sync-report-unmatched
+    // stencil:ro engine-sync-report-unmatched 8beaa3b7c212dcbe829344e1b51b1cafe7973c51863eb6ca946f57a9af6b2069
     /// Names of slots that matched no kinograph entry.
-    pub fn unmatched(&self) -> Vec<&str> {
+    pub fn unmatched(&self) -> Vec<&str>
+    // stencil:end
+    {
         self.slots
             .iter()
             .filter(|s| s.status == SlotStatus::Unmatched)
@@ -97,13 +126,18 @@ impl SyncReport {
     }
 }
 
+// stencil:slot engine-sync-outcome
+// stencil:ro engine-sync-outcome 9ea0b0502ec3d2695cfcdaa294612f67e40ab0eec3b35681f3ed1ef0e429e4f7
 /// The result of [`sync_file`]: the updated file plus its report.
 #[derive(Debug, Clone)]
 pub struct SyncOutcome {
     pub file: StencilFile,
     pub report: SyncReport,
 }
+// stencil:end
 
+// stencil:slot engine-sync-file
+// stencil:ro engine-sync-file 31565b160952e02a486c7c81de9833cfea4792bb537dda8626f604ab3a4ff6cf
 /// Sync one file against `resolver`, rendering read-only blocks for the
 /// language `target`. Returns the updated file and a report; the input is not
 /// mutated.
@@ -111,7 +145,9 @@ pub fn sync_file(
     file: &StencilFile,
     resolver: &Resolver,
     target: &dyn LanguageTarget,
-) -> Result<SyncOutcome, StencilError> {
+) -> Result<SyncOutcome, StencilError>
+// stencil:end
+{
     let slot_count = file
         .blocks
         .iter()
@@ -255,6 +291,8 @@ fn build_index(
     Ok(resolve_entries(reference, resolver)?.into_iter().collect())
 }
 
+// stencil:slot engine-kinograph-slot-names
+// stencil:ro engine-kinograph-slot-names f3814390dc44fe4bbb780693672237fe4e79d8d383e6c35e6e31931df619cfd9
 /// The entry names of an api-kinograph, in kinograph (document) order — the
 /// slots `stencil scaffold` should emit, one per entry.
 ///
@@ -270,7 +308,9 @@ fn build_index(
 pub fn kinograph_slot_names(
     reference: &str,
     resolver: &Resolver,
-) -> Result<Vec<String>, StencilError> {
+) -> Result<Vec<String>, StencilError>
+// stencil:end
+{
     let mut names = Vec::new();
     for (name, _) in resolve_entries(reference, resolver)? {
         if name.is_empty() || name.chars().any(char::is_whitespace) {

@@ -1,0 +1,11 @@
+Sync one file against `resolver`, rendering read-only blocks for the
+language `target`. Returns the updated file and a report; the input is not
+mutated.
+
+```rust
+pub fn sync_file(
+    file: &StencilFile,
+    resolver: &Resolver,
+    target: &dyn LanguageTarget,
+) -> Result<SyncOutcome, StencilError>
+```

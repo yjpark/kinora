@@ -1,0 +1,5 @@
+Names of slots whose read-only regions were hand-edited and overwritten.
+
+```rust
+pub fn drifted(&self) -> Vec<&str>
+```

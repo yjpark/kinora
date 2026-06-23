@@ -1,0 +1,9 @@
+The result of [`sync_file`]: the updated file plus its report.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct SyncOutcome {
+    pub file: StencilFile,
+    pub report: SyncReport,
+}
+```

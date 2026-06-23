@@ -1,0 +1,18 @@
+What happened to a single slot's read-only block during a sync.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotStatus {
+    /// The slot had no read-only block; one was created.
+    Created,
+    /// The block existed but its source kino changed; it was refreshed.
+    Updated,
+    /// The block already matched the resolved source; nothing changed.
+    Unchanged,
+    /// The block's read-only region had been hand-edited (same source hash,
+    /// different content); stencil overwrote it.
+    DriftOverwritten,
+    /// The slot names no entry in the bound api-kinograph; left untouched.
+    Unmatched,
+}
+```

@@ -1,0 +1,5 @@
+Names of slots that matched no kinograph entry.
+
+```rust
+pub fn unmatched(&self) -> Vec<&str>
+```

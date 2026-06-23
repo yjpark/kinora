@@ -1,0 +1,6 @@
+Whether the sync altered the file (any block created, updated, or
+drift-overwritten). The CLI writes the file back only when true.
+
+```rust
+pub fn changed(&self) -> bool
+```

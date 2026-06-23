@@ -1,0 +1,9 @@
+The outcome for one slot.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotOutcome {
+    pub name: String,
+    pub status: SlotStatus,
+}
+```

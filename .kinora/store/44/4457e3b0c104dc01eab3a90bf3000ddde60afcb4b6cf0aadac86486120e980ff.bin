@@ -1,0 +1,13 @@
+A summary of a single file's sync.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncReport {
+    /// Per-slot outcomes, in document order.
+    pub slots: Vec<SlotOutcome>,
+    /// Kinograph entries that no slot in the file claims (sorted by name).
+    pub unslotted_entries: Vec<String>,
+    /// Read-only blocks with no owning slot above them (sorted by name).
+    pub orphans: Vec<String>,
+}
+```

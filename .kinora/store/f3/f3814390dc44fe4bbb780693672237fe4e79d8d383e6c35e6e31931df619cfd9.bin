@@ -1,0 +1,19 @@
+The entry names of an api-kinograph, in kinograph (document) order — the
+slots `stencil scaffold` should emit, one per entry.
+
+Mirrors [`sync_file`]'s resolution exactly (see [`resolve_entries`]):
+unresolvable entries are skipped, so every returned name is one a freshly
+scaffolded slot will match; duplicate names are a hard error.
+
+A slot marker is a single whitespace-free token, so an entry whose resolved
+name is empty or contains whitespace can never be slotted (`sync` would
+leave it unmatched, and a scaffolded marker would be unparseable). Rather
+than emit a broken skeleton, this fails loud with
+[`StencilError::UnslottableEntryName`].
+
+```rust
+pub fn kinograph_slot_names(
+    reference: &str,
+    resolver: &Resolver,
+) -> Result<Vec<String>, StencilError>
+```
