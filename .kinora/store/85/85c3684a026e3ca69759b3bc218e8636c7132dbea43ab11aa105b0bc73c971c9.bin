@@ -1,0 +1,6 @@
+The signature code: all fragments joined by a blank line. Empty when the
+spec carries no rust block.
+
+```rust
+pub fn code(&self) -> String
+```

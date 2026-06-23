@@ -22,6 +22,15 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 
+// This module's public API is stencil-managed (dogfood, kinora-3guj): the
+// `SpecItem` struct, its methods, and `SpecError` render into the read-only
+// blocks below from the `stencil-spec-api` api-kinograph. Run `stencil sync` to
+// refresh them; edit the kinos, not the blocks. Method bodies stay editable.
+
+// stencil:kinograph stencil-spec-api
+
+// stencil:slot spec-item
+// stencil:ro spec-item b6dd36662f5a73580d4690b7e8e639d7eadef776d695dfe4d3ab0a0f9f2e421a
 /// A parsed `kudo::api-spec` kino: prose contract + signature code fragments.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpecItem {
@@ -32,11 +41,16 @@ pub struct SpecItem {
     /// is trimmed of surrounding blank lines.
     pub code_fragments: Vec<String>,
 }
+// stencil:end
 
 impl SpecItem {
+    // stencil:slot spec-item-parse
+    // stencil:ro spec-item-parse 48b94ecff4511a91154df00e2247cb1bd6325eab013a10a04d5e21a657d0e23f
     /// Parse a spec kino's markdown content. Infallible — any text is valid
     /// markdown.
-    pub fn parse(markdown: &str) -> Self {
+    pub fn parse(markdown: &str) -> Self
+    // stencil:end
+    {
         let mut code_fragments: Vec<String> = Vec::new();
         let mut removed: Vec<Range<usize>> = Vec::new();
 
@@ -78,30 +92,45 @@ impl SpecItem {
         }
     }
 
+    // stencil:slot spec-item-from-bytes
+    // stencil:ro spec-item-from-bytes 4e9815a60fe5aafe1ff964a2f178c388510f2d20ae0ef5dfd4896fb8d7b178cc
     /// Parse from raw kino bytes, decoding UTF-8 first.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpecError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpecError>
+    // stencil:end
+    {
         let text = std::str::from_utf8(bytes).map_err(|_| SpecError::NotUtf8)?;
         Ok(Self::parse(text))
     }
 
+    // stencil:slot spec-item-code
+    // stencil:ro spec-item-code 85c3684a026e3ca69759b3bc218e8636c7132dbea43ab11aa105b0bc73c971c9
     /// The signature code: all fragments joined by a blank line. Empty when the
     /// spec carries no rust block.
-    pub fn code(&self) -> String {
+    pub fn code(&self) -> String
+    // stencil:end
+    {
         self.code_fragments.join("\n\n")
     }
 
+    // stencil:slot spec-item-has-code
+    // stencil:ro spec-item-has-code a7bf309d8ae4c02703dc6dd55b864888333bf0e46eee7f3f1bd654ea346db02c
     /// Whether the spec carries any signature code.
-    pub fn has_code(&self) -> bool {
+    pub fn has_code(&self) -> bool
+    // stencil:end
+    {
         !self.code_fragments.is_empty()
     }
 }
 
+// stencil:slot spec-error
+// stencil:ro spec-error 45f359673d28f132422983cc24db4e921ffda310034c5602a710ba1501871388
 /// Error from decoding a spec kino's bytes.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpecError {
     #[error("api-spec kino content is not valid UTF-8")]
     NotUtf8,
 }
+// stencil:end
 
 /// A fenced block's info string designates rust iff its first token (split on
 /// `,` or whitespace) is exactly `rust` — so `rust`, `rust,ignore`, and

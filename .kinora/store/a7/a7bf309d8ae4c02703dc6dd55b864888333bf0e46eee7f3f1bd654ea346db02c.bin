@@ -1,0 +1,5 @@
+Whether the spec carries any signature code.
+
+```rust
+pub fn has_code(&self) -> bool
+```

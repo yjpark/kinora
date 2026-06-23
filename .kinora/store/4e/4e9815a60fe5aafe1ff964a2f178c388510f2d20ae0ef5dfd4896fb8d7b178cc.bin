@@ -1,0 +1,5 @@
+Parse from raw kino bytes, decoding UTF-8 first.
+
+```rust
+pub fn from_bytes(bytes: &[u8]) -> Result<Self, SpecError>
+```

@@ -1,0 +1,13 @@
+A parsed `kudo::api-spec` kino: prose contract + signature code fragments.
+
+````rust
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SpecItem {
+    /// The behavioral contract: markdown with the rust code blocks removed,
+    /// normalized (runs of blank lines collapsed, ends trimmed).
+    pub doc_prose: String,
+    /// The inner text of each ```rust block, in document order. Each fragment
+    /// is trimmed of surrounding blank lines.
+    pub code_fragments: Vec<String>,
+}
+````

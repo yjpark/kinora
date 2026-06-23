@@ -1,0 +1,6 @@
+Parse a spec kino's markdown content. Infallible — any text is valid
+markdown.
+
+```rust
+pub fn parse(markdown: &str) -> Self
+```

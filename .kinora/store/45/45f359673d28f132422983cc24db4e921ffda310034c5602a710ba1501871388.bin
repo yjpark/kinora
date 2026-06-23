@@ -1,0 +1,9 @@
+Error from decoding a spec kino's bytes.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SpecError {
+    #[error("api-spec kino content is not valid UTF-8")]
+    NotUtf8,
+}
+```

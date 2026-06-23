@@ -1,10 +1,11 @@
 ---
 # kinora-3guj
 title: 'Dogfood: extend stencil api-kinograph to engine/region/spec/kinds/lib'
-status: todo
+status: in-progress
 type: task
+priority: normal
 created_at: 2026-06-23T00:56:17Z
-updated_at: 2026-06-23T00:56:17Z
+updated_at: 2026-06-23T01:01:30Z
 parent: kinora-bm7z
 ---
 
@@ -22,3 +23,20 @@ Extend the kinora-se7b dogfood from target.rs to the rest of stencil's public su
 - Kinograph granularity: per-module vs one crate-wide stencil-api kinograph.
 - Validate the fn signature/body split on real multi-line signatures (e.g. engine::sync_file).
 - Consider kinora commit to fold the api-spec kinos from staged into a root once the full surface is captured.
+
+## Progress
+
+Resolved open question — **kinograph granularity = per-module/per-file**. The in-place file-binding model means each source file binds one kinograph; a single crate-wide kinograph bound by one file would make every other file report all foreign items as unslotted. So: one kinograph per module (`stencil-target-api`, `stencil-spec-api`, …). A crate-wide composition can later layer over these if needed.
+
+### Increment 1: spec.rs ✓ (validated the fn signature/body split)
+- [x] api-spec kinos: spec-item (struct), spec-error (enum), spec-item-parse, spec-item-from-bytes, spec-item-code, spec-item-has-code (methods — fn split)
+- [x] kinograph stencil-spec-api
+- [x] markers in spec.rs; sync (6 created); compiles; 72 tests pass; second sync no-op
+
+**Validated:** the fn signature/body split (`pub fn f() -> T` read-only, `{ body }` editable) compiles and re-syncs clean. Also surfaced + handled the **4-backtick fence** case: `SpecItem`'s field doc contains ` ```rust `, so its spec kino wraps the definition in a 4-backtick fence — pulldown-cmark + SpecItem::parse handle it, rendering the triple-backtick text verbatim into source.
+
+### Remaining modules
+- [ ] kinds.rs (2 consts — whole-item)
+- [ ] lib.rs (StencilError enum — whole-item)
+- [ ] region.rs (9 items — multi-line sigs, generics)
+- [ ] engine.rs (9 items — multi-line sigs)
