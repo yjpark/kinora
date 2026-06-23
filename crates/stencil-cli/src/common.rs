@@ -21,11 +21,6 @@ pub enum CliError {
     /// A `sync` path argument that does not exist on disk.
     #[error("path does not exist: {path}", path = .path.display())]
     PathNotFound { path: PathBuf },
-
-    /// A subcommand whose engine has not landed yet. Scaffolding ships the CLI
-    /// surface ahead of the implementing beans (kinora-exay / kinora-guv8).
-    #[error("`stencil {command}` is not implemented yet (tracked in beans)")]
-    NotImplemented { command: &'static str },
 }
 
 /// Walk up from `start` looking for a directory that contains `.kinora/`.

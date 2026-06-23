@@ -65,4 +65,6 @@ pub enum StencilError {
     NotApiSpec { name: String, kind: String },
     #[error("api-kinograph has two entries named `{name}`; names must be unique to match slots")]
     DuplicateEntryName { name: String },
+    #[error("api-kinograph entry name `{name}` cannot be a stencil slot: slot names must be a single token with no whitespace")]
+    UnslottableEntryName { name: String },
 }

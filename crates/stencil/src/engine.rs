@@ -204,20 +204,22 @@ pub fn sync_file(
     Ok(SyncOutcome { file: StencilFile { blocks: new_blocks }, report })
 }
 
-/// Resolve the api-kinograph named by `reference` and index its entries by
-/// name. Resolution is *tolerant per entry*: an entry that fails to resolve
-/// (e.g. an unrelated fork or bad pin) is skipped rather than failing the whole
-/// sync — kind validation and spec parsing are deferred to [`render_entry`],
-/// which only runs for the entries a slot actually claims. Kinograph-level
-/// problems (missing, wrong kind, parse, ambiguous names) are still loud.
+/// Resolve the api-kinograph named by `reference` into ordered `(name,
+/// Resolved)` pairs, in kinograph (document) order.
+///
+/// Resolution is *tolerant per entry*: an entry that fails to resolve (e.g. an
+/// unrelated fork or bad pin) is skipped rather than failing the whole call —
+/// kind validation and spec parsing are deferred to [`render_entry`], which
+/// only runs for the entries a slot actually claims. Kinograph-level problems
+/// (missing, wrong kind, parse, ambiguous names) are still loud.
 ///
 /// Two entries resolving to the same name is a kinograph defect that makes
 /// slot-matching ambiguous, so it fails with [`StencilError::DuplicateEntryName`]
 /// (mirroring kinora's fail-loud-on-ambiguity convention).
-fn build_index(
+fn resolve_entries(
     reference: &str,
     resolver: &Resolver,
-) -> Result<BTreeMap<String, Resolved>, StencilError> {
+) -> Result<Vec<(String, Resolved)>, StencilError> {
     let kg_resolved = resolve_reference(resolver, reference)?;
     if kg_resolved.head.kind != kinds::API_KINOGRAPH {
         return Err(StencilError::NotApiKinograph {
@@ -227,7 +229,8 @@ fn build_index(
     }
     let kg = Kinograph::parse(&kg_resolved.content)?.resolve_names(resolver)?;
 
-    let mut index: BTreeMap<String, Resolved> = BTreeMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut entries: Vec<(String, Resolved)> = Vec::new();
     for entry in &kg.entries {
         let resolved = match entry.pin_opt() {
             Some(pin) => resolver.resolve_at_version(&entry.id, pin),
@@ -235,11 +238,47 @@ fn build_index(
         };
         let Ok(resolved) = resolved else { continue };
         let name = entry_name(&resolved, entry);
-        if index.insert(name.clone(), resolved).is_some() {
+        if !seen.insert(name.clone()) {
             return Err(StencilError::DuplicateEntryName { name });
         }
+        entries.push((name, resolved));
     }
-    Ok(index)
+    Ok(entries)
+}
+
+/// Resolve the api-kinograph named by `reference` and index its entries by
+/// name. See [`resolve_entries`] for resolution semantics.
+fn build_index(
+    reference: &str,
+    resolver: &Resolver,
+) -> Result<BTreeMap<String, Resolved>, StencilError> {
+    Ok(resolve_entries(reference, resolver)?.into_iter().collect())
+}
+
+/// The entry names of an api-kinograph, in kinograph (document) order — the
+/// slots `stencil scaffold` should emit, one per entry.
+///
+/// Mirrors [`sync_file`]'s resolution exactly (see [`resolve_entries`]):
+/// unresolvable entries are skipped, so every returned name is one a freshly
+/// scaffolded slot will match; duplicate names are a hard error.
+///
+/// A slot marker is a single whitespace-free token, so an entry whose resolved
+/// name is empty or contains whitespace can never be slotted (`sync` would
+/// leave it unmatched, and a scaffolded marker would be unparseable). Rather
+/// than emit a broken skeleton, this fails loud with
+/// [`StencilError::UnslottableEntryName`].
+pub fn kinograph_slot_names(
+    reference: &str,
+    resolver: &Resolver,
+) -> Result<Vec<String>, StencilError> {
+    let mut names = Vec::new();
+    for (name, _) in resolve_entries(reference, resolver)? {
+        if name.is_empty() || name.chars().any(char::is_whitespace) {
+            return Err(StencilError::UnslottableEntryName { name });
+        }
+        names.push(name);
+    }
+    Ok(names)
 }
 
 /// Render a slotted entry's read-only block: validate it is an api-spec, split
@@ -742,5 +781,104 @@ mod tests {
         let resolver = Resolver::load(&root).unwrap();
         let err = sync_file(&file, &resolver, &RustTarget).unwrap_err();
         assert!(matches!(err, StencilError::DuplicateEntryName { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn slot_names_preserve_kinograph_order() {
+        let (_t, root) = setup();
+        // Store in one order; reference them in a different kinograph order.
+        let find = store_spec(
+            &root,
+            "user-find",
+            "Finds a user.\n\n```rust\npub fn find(id: u64) -> Option<User>;\n```\n",
+        );
+        let new = store_spec(&root, "user-new", SPEC_MD);
+        store_kinograph(
+            &root,
+            "user-api",
+            vec![
+                kinora::kinograph::Entry::with_id(new.id),
+                kinora::kinograph::Entry::with_id(find.id),
+            ],
+        );
+
+        let resolver = Resolver::load(&root).unwrap();
+        let names = kinograph_slot_names("user-api", &resolver).unwrap();
+        // Document order, not alphabetical (which would put user-find first).
+        assert_eq!(names, vec!["user-new".to_string(), "user-find".into()]);
+    }
+
+    #[test]
+    fn slot_names_skip_unresolvable_entries() {
+        let (_t, root) = setup();
+        let good = store_spec(&root, "user-new", SPEC_MD);
+        // A forked entry resolves ambiguously and is skipped.
+        let v1 = store_spec(&root, "forked", "Doc.\n\n```rust\npub fn f();\n```\n");
+        for (content, ts) in [
+            (b"Doc.\n\n```rust\npub fn left();\n```\n".as_slice(), "2026-06-10T11:00:00Z"),
+            (b"Doc.\n\n```rust\npub fn right();\n```\n", "2026-06-10T11:00:01Z"),
+        ] {
+            let mut p = params(kinds::API_SPEC, content, "forked");
+            p.id = Some(v1.id.clone());
+            p.parents = vec![v1.hash.clone()];
+            p.ts = ts.into();
+            store_kino(&root, p).unwrap();
+        }
+        store_kinograph(
+            &root,
+            "user-api",
+            vec![
+                kinora::kinograph::Entry::with_id(good.id),
+                kinora::kinograph::Entry::with_id(v1.id),
+            ],
+        );
+
+        let resolver = Resolver::load(&root).unwrap();
+        let names = kinograph_slot_names("user-api", &resolver).unwrap();
+        assert_eq!(names, vec!["user-new".to_string()]);
+    }
+
+    #[test]
+    fn slot_names_error_on_duplicate() {
+        let (_t, root) = setup();
+        let a = store_spec(&root, "dup", "Doc A.\n\n```rust\npub fn a();\n```\n");
+        let b = store_spec(&root, "dup", "Doc B.\n\n```rust\npub fn b();\n```\n");
+        store_kinograph(
+            &root,
+            "user-api",
+            vec![
+                kinora::kinograph::Entry::with_id(a.id),
+                kinora::kinograph::Entry::with_id(b.id),
+            ],
+        );
+
+        let resolver = Resolver::load(&root).unwrap();
+        let err = kinograph_slot_names("user-api", &resolver).unwrap_err();
+        assert!(matches!(err, StencilError::DuplicateEntryName { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn slot_names_reject_non_kinograph() {
+        let (_t, root) = setup();
+        store_kino(&root, params("markdown", b"just docs", "user-api")).unwrap();
+        let resolver = Resolver::load(&root).unwrap();
+        let err = kinograph_slot_names("user-api", &resolver).unwrap_err();
+        assert!(matches!(err, StencilError::NotApiKinograph { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn slot_names_error_on_whitespace_name() {
+        let (_t, root) = setup();
+        // A spec whose metadata name has a space cannot be a single-token slot.
+        let spec = store_spec(&root, "user new", SPEC_MD);
+        store_kinograph(
+            &root,
+            "user-api",
+            vec![kinora::kinograph::Entry::with_id(spec.id)],
+        );
+
+        let resolver = Resolver::load(&root).unwrap();
+        let err = kinograph_slot_names("user-api", &resolver).unwrap_err();
+        assert!(matches!(err, StencilError::UnslottableEntryName { .. }), "got: {err:?}");
     }
 }

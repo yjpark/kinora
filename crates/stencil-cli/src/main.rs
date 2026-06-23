@@ -13,6 +13,7 @@ use rootcause::Report;
 
 mod cli;
 mod common;
+mod scaffold;
 mod sync;
 
 fn main() -> ExitCode {
@@ -76,9 +77,7 @@ fn run() -> ExitCode {
 
     match cli.command {
         Command::Sync { paths } => run_sync_command(&repo_root, &cwd, &paths),
-        Command::Scaffold { .. } => {
-            report_err("scaffold", common::CliError::NotImplemented { command: "scaffold" })
-        }
+        Command::Scaffold { kinograph } => run_scaffold_command(&repo_root, &kinograph),
     }
 }
 
@@ -96,6 +95,18 @@ fn run_sync_command(repo_root: &Path, cwd: &Path, paths: &[String]) -> ExitCode 
             }
         }
         Err(e) => report_err("sync", e),
+    }
+}
+
+/// Drive `stencil scaffold`: generate a fresh source file for an api-kinograph
+/// and print it to stdout for the caller to redirect.
+fn run_scaffold_command(repo_root: &Path, kinograph: &str) -> ExitCode {
+    match scaffold::run_scaffold(repo_root, kinograph, &RustTarget) {
+        Ok(source) => {
+            print!("{source}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => report_err("scaffold", e),
     }
 }
 
