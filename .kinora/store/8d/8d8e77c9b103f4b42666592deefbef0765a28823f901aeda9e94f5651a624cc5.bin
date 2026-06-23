@@ -1,0 +1,5 @@
+Parse `input` into structural blocks using `target`'s comment leader.
+
+```rust
+pub fn parse(input: &str, target: &dyn LanguageTarget) -> Result<Self, ParseError>
+```

@@ -1,0 +1,10 @@
+Build a read-only block from rendered `content` lines.
+
+```rust
+pub fn read_only(
+    name: impl Into<String>,
+    hash: impl Into<String>,
+    content: Vec<String>,
+    indent: impl Into<String>,
+) -> Self
+```

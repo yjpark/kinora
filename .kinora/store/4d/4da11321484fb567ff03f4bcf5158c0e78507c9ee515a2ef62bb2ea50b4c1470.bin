@@ -1,0 +1,6 @@
+Render the file back to source text using `target`'s comment leader.
+Inverse of [`parse`](Self::parse) for canonical input.
+
+```rust
+pub fn to_source(&self, target: &dyn LanguageTarget) -> String
+```

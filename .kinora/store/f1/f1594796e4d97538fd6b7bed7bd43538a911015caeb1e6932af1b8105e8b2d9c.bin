@@ -1,0 +1,6 @@
+Render this block back to its source lines (no terminators), using
+`leader` for marker lines.
+
+```rust
+pub fn to_lines(&self, leader: &str) -> Vec<String>
+```

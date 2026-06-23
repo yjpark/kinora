@@ -25,6 +25,16 @@ const DIR_SLOT: &str = "slot";
 const DIR_RO: &str = "ro";
 const DIR_END: &str = "end";
 
+// This module's public API is stencil-managed (dogfood, kinora-3guj): the
+// Block / StencilFile / ParseError types and their methods render into the
+// read-only blocks below from the `stencil-region-api` api-kinograph. Run
+// `stencil sync` to refresh them; edit the kinos, not the blocks. Method
+// bodies and private helpers stay editable.
+
+// stencil:kinograph stencil-region-api
+
+// stencil:slot region-block
+// stencil:ro region-block 3915c0777bef516b319588ee9ce18a80b84c5f5bb258ea6378b2782eec0373e2
 /// One structural block of a stencil-managed file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
@@ -47,15 +57,20 @@ pub enum Block {
         content: Vec<String>,
     },
 }
+// stencil:end
 
 impl Block {
+    // stencil:slot region-block-read-only
+    // stencil:ro region-block-read-only 8bafe8908f5405847f478193e0ba0065de36ddf9de9f841f9b70aed4aebed5c2
     /// Build a read-only block from rendered `content` lines.
     pub fn read_only(
         name: impl Into<String>,
         hash: impl Into<String>,
         content: Vec<String>,
         indent: impl Into<String>,
-    ) -> Self {
+    ) -> Self
+    // stencil:end
+    {
         Block::ReadOnly {
             indent: indent.into(),
             name: name.into(),
@@ -64,9 +79,13 @@ impl Block {
         }
     }
 
+    // stencil:slot region-block-to-lines
+    // stencil:ro region-block-to-lines f1594796e4d97538fd6b7bed7bd43538a911015caeb1e6932af1b8105e8b2d9c
     /// Render this block back to its source lines (no terminators), using
     /// `leader` for marker lines.
-    pub fn to_lines(&self, leader: &str) -> Vec<String> {
+    pub fn to_lines(&self, leader: &str) -> Vec<String>
+    // stencil:end
+    {
         match self {
             Block::Text { lines } => lines.clone(),
             Block::Binding { indent, reference } => {
@@ -91,12 +110,17 @@ impl Block {
     }
 }
 
+// stencil:slot region-stencil-file
+// stencil:ro region-stencil-file 2fb0ed9ffdf239b7cc46e7f5e2496805d02e282f90250318d42ba007b538f162
 /// A parsed stencil-managed source file: an ordered list of [`Block`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StencilFile {
     pub blocks: Vec<Block>,
 }
+// stencil:end
 
+// stencil:slot region-parse-error
+// stencil:ro region-parse-error e08126b18db1d284bf6962aeac9b536c1185cb5955c6adf5a7e7e28c53495a7a
 /// Errors from [`StencilFile::parse`]. Line numbers are 1-based.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
@@ -113,6 +137,7 @@ pub enum ParseError {
         reason: String,
     },
 }
+// stencil:end
 
 /// A recognized marker line, split into directive + whitespace-delimited args.
 struct Marker<'a> {
@@ -158,8 +183,12 @@ struct OpenRo {
 }
 
 impl StencilFile {
+    // stencil:slot region-stencil-file-parse
+    // stencil:ro region-stencil-file-parse 8d8e77c9b103f4b42666592deefbef0765a28823f901aeda9e94f5651a624cc5
     /// Parse `input` into structural blocks using `target`'s comment leader.
-    pub fn parse(input: &str, target: &dyn LanguageTarget) -> Result<Self, ParseError> {
+    pub fn parse(input: &str, target: &dyn LanguageTarget) -> Result<Self, ParseError>
+    // stencil:end
+    {
         let leader = target.comment_leader();
         let mut blocks: Vec<Block> = Vec::new();
         let mut text: Vec<String> = Vec::new();
@@ -262,9 +291,13 @@ impl StencilFile {
         Ok(Self { blocks })
     }
 
+    // stencil:slot region-stencil-file-to-source
+    // stencil:ro region-stencil-file-to-source 4da11321484fb567ff03f4bcf5158c0e78507c9ee515a2ef62bb2ea50b4c1470
     /// Render the file back to source text using `target`'s comment leader.
     /// Inverse of [`parse`](Self::parse) for canonical input.
-    pub fn to_source(&self, target: &dyn LanguageTarget) -> String {
+    pub fn to_source(&self, target: &dyn LanguageTarget) -> String
+    // stencil:end
+    {
         let leader = target.comment_leader();
         let mut lines: Vec<String> = Vec::new();
         for block in &self.blocks {
@@ -273,17 +306,25 @@ impl StencilFile {
         lines.join("\n")
     }
 
+    // stencil:slot region-stencil-file-binding
+    // stencil:ro region-stencil-file-binding b504b439e120333916ffafa103af0740a9dc8641694fa1928670327d7e8a57fc
     /// The api-kinograph reference this file is bound to, if it declares one
     /// (the first `stencil:kinograph` binding).
-    pub fn binding(&self) -> Option<&str> {
+    pub fn binding(&self) -> Option<&str>
+    // stencil:end
+    {
         self.blocks.iter().find_map(|b| match b {
             Block::Binding { reference, .. } => Some(reference.as_str()),
             _ => None,
         })
     }
 
+    // stencil:slot region-stencil-file-slot-names
+    // stencil:ro region-stencil-file-slot-names cf379e965dd707dc0660d94ca869351871822b688527a20035396247b7ee72f6
     /// The slot names declared in this file, in document order.
-    pub fn slot_names(&self) -> Vec<&str> {
+    pub fn slot_names(&self) -> Vec<&str>
+    // stencil:end
+    {
         self.blocks
             .iter()
             .filter_map(|b| match b {

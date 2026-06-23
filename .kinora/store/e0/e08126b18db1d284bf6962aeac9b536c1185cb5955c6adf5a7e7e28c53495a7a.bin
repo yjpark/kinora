@@ -1,0 +1,19 @@
+Errors from [`StencilFile::parse`]. Line numbers are 1-based.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseError {
+    #[error("line {line}: `stencil:ro` block opened here was never closed with `stencil:end`")]
+    UnterminatedReadOnly { line: usize },
+    #[error("line {line}: `stencil:end` with no open `stencil:ro` block")]
+    UnexpectedEnd { line: usize },
+    #[error("line {line}: `stencil:ro` nested inside an open read-only block")]
+    NestedReadOnly { line: usize },
+    #[error("line {line}: malformed `stencil:{directive}` marker: {reason}")]
+    Malformed {
+        line: usize,
+        directive: String,
+        reason: String,
+    },
+}
+```

@@ -1,0 +1,25 @@
+One structural block of a stencil-managed file.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    /// Verbatim editable lines (no trailing line terminators stored). Preserved
+    /// byte-for-byte across a round-trip.
+    Text { lines: Vec<String> },
+    /// `stencil:kinograph <reference>` — binds the file to an api-kinograph by
+    /// name or id.
+    Binding { indent: String, reference: String },
+    /// `stencil:slot <name>` — an agent-placed anchor naming the api-kinograph
+    /// entry whose read-only block belongs here.
+    Slot { indent: String, name: String },
+    /// `stencil:ro <name> <hash>` … `stencil:end`. `content` is the inner,
+    /// stencil-authored lines (excludes the two marker lines). `hash` is the
+    /// resolved spec-kino content hash (empty string if absent).
+    ReadOnly {
+        indent: String,
+        name: String,
+        hash: String,
+        content: Vec<String>,
+    },
+}
+```

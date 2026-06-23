@@ -1,0 +1,8 @@
+A parsed stencil-managed source file: an ordered list of [`Block`]s.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StencilFile {
+    pub blocks: Vec<Block>,
+}
+```

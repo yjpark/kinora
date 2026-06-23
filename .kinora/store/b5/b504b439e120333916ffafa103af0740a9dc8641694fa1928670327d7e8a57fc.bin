@@ -1,0 +1,6 @@
+The api-kinograph reference this file is bound to, if it declares one
+(the first `stencil:kinograph` binding).
+
+```rust
+pub fn binding(&self) -> Option<&str>
+```

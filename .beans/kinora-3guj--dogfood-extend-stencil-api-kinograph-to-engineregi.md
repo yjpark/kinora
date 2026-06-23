@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: normal
 created_at: 2026-06-23T00:56:17Z
-updated_at: 2026-06-23T01:06:36Z
+updated_at: 2026-06-23T01:10:58Z
 parent: kinora-bm7z
 ---
 
@@ -41,8 +41,8 @@ Resolved open question — **kinograph granularity = per-module/per-file**. The 
 
 **Finding (positive):** a doc comment containing ` ```rust ` *in prose* (kinds API_SPEC) renders correctly — pulldown-cmark treats the unclosed inline backticks as literal text (the paragraph ends before the real fence), so SpecItem::parse extracts the real fenced block cleanly and the prose reproduces verbatim. The content model handles backtick-bearing docs both in prose (inline) and inside definitions (4-backtick fence, validated in spec.rs).
 
-### Remaining modules
-- [ ] region.rs (9 items — multi-line sigs, generics, the Block enum)
-- [ ] engine.rs (9 items — multi-line sigs)
+### Increment 3: region.rs ✓
+- [x] 9 items → stencil-region-api: Block enum (data-carrying variants), StencilFile struct, ParseError enum (whole-item); read_only/to_lines/parse/to_source/binding/slot_names (methods, incl. multi-line read_only signature). sync (9 created); compiles; 72 tests; second sync no-op (the rebuilt parser round-trips its own dogfooded source).
 
-These two large modules follow the now fully-validated convention (whole-item + fn signature/body split). They are the bulk of the remaining mechanical work.
+### Remaining modules
+- [ ] engine.rs (9 items — SlotStatus/SlotOutcome/SyncReport/SyncOutcome + sync_file/kinograph_slot_names + SyncReport methods)

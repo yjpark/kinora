@@ -1,0 +1,5 @@
+The slot names declared in this file, in document order.
+
+```rust
+pub fn slot_names(&self) -> Vec<&str>
+```
