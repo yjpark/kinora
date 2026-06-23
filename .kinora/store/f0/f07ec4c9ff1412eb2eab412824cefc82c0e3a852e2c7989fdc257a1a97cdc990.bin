@@ -1,0 +1,8 @@
+The per-crate API composition: references the spec kinos that make up a
+crate's API. Content is the kinora composition entry shape (styxl
+`{id, name?, pin?, note?}` lines), parsed via
+`kinora::kinograph::Kinograph`.
+
+```rust
+pub const API_KINOGRAPH: &str = "kudo::api-kinograph";
+```

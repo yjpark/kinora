@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: normal
 created_at: 2026-06-23T00:56:17Z
-updated_at: 2026-06-23T01:01:30Z
+updated_at: 2026-06-23T01:06:36Z
 parent: kinora-bm7z
 ---
 
@@ -35,8 +35,14 @@ Resolved open question — **kinograph granularity = per-module/per-file**. The 
 
 **Validated:** the fn signature/body split (`pub fn f() -> T` read-only, `{ body }` editable) compiles and re-syncs clean. Also surfaced + handled the **4-backtick fence** case: `SpecItem`'s field doc contains ` ```rust `, so its spec kino wraps the definition in a 4-backtick fence — pulldown-cmark + SpecItem::parse handle it, rendering the triple-backtick text verbatim into source.
 
+### Increment 2: kinds.rs + lib.rs ✓ (whole-item)
+- [x] kinds.rs: kinds-api-spec, kinds-api-kinograph consts → stencil-kinds-api kinograph; sync (2 created); no-op.
+- [x] lib.rs: stencil-error enum → stencil-lib-api kinograph; sync (1 created); no-op.
+
+**Finding (positive):** a doc comment containing ` ```rust ` *in prose* (kinds API_SPEC) renders correctly — pulldown-cmark treats the unclosed inline backticks as literal text (the paragraph ends before the real fence), so SpecItem::parse extracts the real fenced block cleanly and the prose reproduces verbatim. The content model handles backtick-bearing docs both in prose (inline) and inside definitions (4-backtick fence, validated in spec.rs).
+
 ### Remaining modules
-- [ ] kinds.rs (2 consts — whole-item)
-- [ ] lib.rs (StencilError enum — whole-item)
-- [ ] region.rs (9 items — multi-line sigs, generics)
+- [ ] region.rs (9 items — multi-line sigs, generics, the Block enum)
 - [ ] engine.rs (9 items — multi-line sigs)
+
+These two large modules follow the now fully-validated convention (whole-item + fn signature/body split). They are the bulk of the remaining mechanical work.

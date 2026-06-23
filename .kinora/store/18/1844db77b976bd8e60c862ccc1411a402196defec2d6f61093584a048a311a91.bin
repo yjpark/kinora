@@ -1,0 +1,7 @@
+A single spec kino: one element of a crate's public surface (atomic or
+logical-unit). Content is markdown — prose contract + fenced ```rust
+signature blocks.
+
+```rust
+pub const API_SPEC: &str = "kudo::api-spec";
+```

@@ -39,6 +39,14 @@ pub mod region;
 pub mod spec;
 pub mod target;
 
+// The crate's base error type is stencil-managed (dogfood, kinora-3guj): the
+// `StencilError` enum renders into the read-only block below from the
+// `stencil-lib-api` api-kinograph. Run `stencil sync` to refresh it.
+
+// stencil:kinograph stencil-lib-api
+
+// stencil:slot stencil-error
+// stencil:ro stencil-error 0f708ba665f14f2207397e2c3cb6cbaec25986043a2446d55399e340030b7ad6
 /// Base error type for the stencil library. Follows kinora's convention:
 /// libraries use `thiserror`, the CLI wraps these in `rootcause` reports.
 ///
@@ -68,3 +76,4 @@ pub enum StencilError {
     #[error("api-kinograph entry name `{name}` cannot be a stencil slot: slot names must be a single token with no whitespace")]
     UnslottableEntryName { name: String },
 }
+// stencil:end

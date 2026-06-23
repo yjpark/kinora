@@ -1,0 +1,32 @@
+Base error type for the stencil library. Follows kinora's convention:
+libraries use `thiserror`, the CLI wraps these in `rootcause` reports.
+
+Grows as the engine lands (kinora-q28s/thow/hgpl); at scaffolding time it
+carries the foundational `From` conversions for the kinora errors stencil
+builds on.
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StencilError {
+    #[error("stencil io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Parse(#[from] region::ParseError),
+    #[error(transparent)]
+    Spec(#[from] spec::SpecError),
+    #[error(transparent)]
+    Resolve(#[from] kinora::resolve::ResolveError),
+    #[error(transparent)]
+    Kinograph(#[from] kinora::kinograph::KinographError),
+    #[error("file declares stencil slots but no `stencil:kinograph` binding")]
+    NoBinding,
+    #[error("binding `{reference}` resolves to kind `{kind}`, not an api-kinograph (`kudo::api-kinograph`)")]
+    NotApiKinograph { reference: String, kind: String },
+    #[error("api-kinograph entry `{name}` resolves to kind `{kind}`, not an api-spec (`kudo::api-spec`)")]
+    NotApiSpec { name: String, kind: String },
+    #[error("api-kinograph has two entries named `{name}`; names must be unique to match slots")]
+    DuplicateEntryName { name: String },
+    #[error("api-kinograph entry name `{name}` cannot be a stencil slot: slot names must be a single token with no whitespace")]
+    UnslottableEntryName { name: String },
+}
+```
