@@ -1,0 +1,6 @@
+The Rust language target: `//` markers, `///` doc-comments.
+
+```rust
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RustTarget;
+```

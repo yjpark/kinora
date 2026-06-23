@@ -1,0 +1,14 @@
+What stencil needs to know about a target language to render markers and doc contracts into its source.
+
+```rust
+pub trait LanguageTarget {
+    /// The line-comment leader that prefixes every stencil marker, e.g. `//`
+    /// for Rust. Markers are spelled `<leader> stencil:<directive> …`.
+    fn comment_leader(&self) -> &str;
+
+    /// Render a prose behavioral contract as a doc-comment block for this
+    /// language. Each input line maps to one output line; the result has no
+    /// trailing newline (callers compose it with the signature code).
+    fn doc_comment(&self, prose: &str) -> String;
+}
+```

@@ -4,8 +4,17 @@
 //! [`LanguageTarget`]. Bootstrap ships [`RustTarget`]; other languages are
 //! additive (RFC-0004 principle 3) with no engine redesign.
 
-/// What stencil needs to know about a target language to render markers and
-/// doc contracts into its source.
+// This module's public API is stencil-managed: the `LanguageTarget` trait and
+// the `RustTarget` struct are rendered into the read-only blocks below from
+// `kudo::api-spec` kinos composed by the `stencil-target-api` api-kinograph
+// (dogfood, kinora-se7b). Run `stencil sync` to refresh them; edit the kinos,
+// not the blocks. The `impl` and tests beneath remain freely editable.
+
+// stencil:kinograph stencil-target-api
+
+// stencil:slot target-language-target
+// stencil:ro target-language-target 1a2a5f0ae03a6515b822d499f01aa5b9b45d0784aacfdccd0db76102464b6884
+/// What stencil needs to know about a target language to render markers and doc contracts into its source.
 pub trait LanguageTarget {
     /// The line-comment leader that prefixes every stencil marker, e.g. `//`
     /// for Rust. Markers are spelled `<leader> stencil:<directive> …`.
@@ -16,10 +25,14 @@ pub trait LanguageTarget {
     /// trailing newline (callers compose it with the signature code).
     fn doc_comment(&self, prose: &str) -> String;
 }
+// stencil:end
 
+// stencil:slot target-rust-target
+// stencil:ro target-rust-target 377dd98fda79b8c8c5be0f83dafffabe785133bbadc428610c4c75bdea0a9f67
 /// The Rust language target: `//` markers, `///` doc-comments.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RustTarget;
+// stencil:end
 
 impl LanguageTarget for RustTarget {
     fn comment_leader(&self) -> &str {
