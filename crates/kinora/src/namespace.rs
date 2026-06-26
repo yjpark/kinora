@@ -10,6 +10,10 @@ pub const RESERVED_METADATA_KEYS: &[&str] = &[
     "tags",
     "links",
     "entry_notes",
+    // `inline=true` marks a kino as composable-only: resolvable and
+    // inlinable as a kinograph member, but never routed to its own
+    // standalone render page. See kinora-qzfv.
+    "inline",
 ];
 
 /// Bare values reserved for the ledger event `kind` field. Any bare kind

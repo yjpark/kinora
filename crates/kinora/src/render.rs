@@ -109,6 +109,15 @@ pub fn render(
         if kind == "root" || kind == crate::commit_archive::ARCHIVE_CONTENT_KIND {
             continue;
         }
+        // Inline-only kinos (`metadata inline=true`) are composable as
+        // kinograph members but must never be routed to a standalone page.
+        // A composing kinograph still inlines them via `Kinograph::render`,
+        // which resolves members by id independently of page emission — so
+        // skipping here drops the leaked fragment page without affecting
+        // inlining. See kinora-qzfv.
+        if resolved.head.metadata.get("inline").map(String::as_str) == Some("true") {
+            continue;
+        }
         let name = resolved
             .head
             .metadata
@@ -494,6 +503,67 @@ mod tests {
         let kg_page = book.pages.iter().find(|p| p.kind == "kinograph").unwrap();
         assert!(kg_page.body.contains("alpha"));
         assert!(kg_page.body.contains("bravo"));
+    }
+
+    #[test]
+    fn inline_metadata_kino_is_not_emitted_as_standalone_page() {
+        let (_t, root) = setup();
+        store_kino(&root, params("markdown", b"real page", "visible")).unwrap();
+        let mut p = params("markdown", b"connective prose", "intro");
+        p.metadata.insert("inline".into(), "true".into());
+        store_kino(&root, p).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let book = render_all_under(&resolver, "main").unwrap();
+        let titles: Vec<_> = book.pages.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, vec!["visible"], "inline kino leaked as a page");
+    }
+
+    #[test]
+    fn inline_only_kino_still_inlines_into_composing_kinograph() {
+        let (_t, root) = setup();
+        let mut intro_p = params("markdown", b"INTRO PROSE", "intro");
+        intro_p.metadata.insert("inline".into(), "true".into());
+        let intro = store_kino(&root, intro_p).unwrap();
+        let body = store_kino(&root, params("markdown", b"BODY CONTENT", "body")).unwrap();
+
+        let kg_content =
+            format!("entries ({{id {}}} {{id {}}})", intro.event.id, body.event.id);
+        store_kino(&root, params("kinograph", kg_content.as_bytes(), "post")).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let book = render_all_under(&resolver, "main").unwrap();
+
+        let kg_page = book.pages.iter().find(|p| p.kind == "kinograph").unwrap();
+        assert!(
+            kg_page.body.contains("INTRO PROSE"),
+            "inline-only member must still inline: {}",
+            kg_page.body
+        );
+        assert!(kg_page.body.contains("BODY CONTENT"));
+        assert!(
+            !book.pages.iter().any(|p| p.title == "intro"),
+            "inline-only kino must not get its own page"
+        );
+        assert!(
+            book.pages.iter().any(|p| p.title == "body"),
+            "normal member should still get its own page"
+        );
+    }
+
+    #[test]
+    fn inline_false_metadata_still_renders_as_page() {
+        // Only the exact string "true" suppresses the page; other values
+        // (including "false") are treated as a normal page.
+        let (_t, root) = setup();
+        let mut p = params("markdown", b"shown", "doc");
+        p.metadata.insert("inline".into(), "false".into());
+        store_kino(&root, p).unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let book = render_all_under(&resolver, "main").unwrap();
+        assert_eq!(book.pages.len(), 1);
+        assert_eq!(book.pages[0].title, "doc");
     }
 
     #[test]
