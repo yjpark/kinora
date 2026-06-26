@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! {id <lineage-id>, parents (<prior>, ...), ts <rfc3339>, author "...", provenance "..."}
-//! {id <entry-id>, version <hash>, kind markdown, metadata {...}, note "", pin false, head_ts <ts>}
+//! {id <entry-id>, version <hash>, kind markdown, metadata {...}, note "", pin false, head_ts <ts>, parents (<prior-version>, ...)}
 //! {id <entry-id>, ...}
 //! ```
 //!
@@ -52,6 +52,14 @@ pub struct RootEntry {
     // "unknown" and conservatively kept by GC).
     #[facet(default)]
     pub head_ts: String,
+    // Version hashes of the head event's parents (the prior version(s) this
+    // entry supersedes). Carried on the entry so the resolver can rebuild
+    // the version graph after Never-policy prune: when a kino's versions are
+    // split across roots, each root synthesizes its entry's event, and these
+    // parents let an ancestor version be demoted from head. Empty on a
+    // birth/genesis version and on legacy kinographs predating this field.
+    #[facet(default)]
+    pub parents: Vec<String>,
 }
 
 /// Commit-metadata line at the top of every root styxl blob.
@@ -137,7 +145,16 @@ impl RootEntry {
             note: String::new(),
             pin: false,
             head_ts: head_ts.into(),
+            parents: Vec::new(),
         }
+    }
+
+    /// Set the head event's parent version hashes, consuming and returning
+    /// `self` for builder-style use. Used by `build_root` to carry lineage
+    /// onto the entry so it survives Never-policy prune.
+    pub fn with_parents(mut self, parents: Vec<String>) -> Self {
+        self.parents = parents;
+        self
     }
 
     pub fn note_opt(&self) -> Option<&str> {
@@ -516,6 +533,31 @@ mod tests {
         let bad: &[u8] = &[0xff, 0xfe, 0xfd];
         let err = RootKinograph::parse(bad).unwrap_err();
         assert!(matches!(err, RootError::Parse(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn roundtrip_with_parents() {
+        let e = sample_entry(4).with_parents(vec![version_hash(3), version_hash(2)]);
+        let r = RootKinograph::with_entries(vec![e.clone()]);
+        let s = r.to_styxl().unwrap();
+        let back = RootKinograph::parse_str(&s).unwrap();
+        assert_eq!(back.entries[0], e);
+        assert_eq!(back.entries[0].parents, vec![version_hash(3), version_hash(2)]);
+    }
+
+    #[test]
+    fn parents_default_empty_on_legacy_entry_without_field() {
+        // An entry line lacking `parents` (pre-this-field kinographs) must
+        // parse with an empty parents list, not fail.
+        let header = "{kind root, id abc}";
+        let entry = format!(
+            "{{id {}, version {}, kind markdown, metadata {{name a}}}}",
+            id(1),
+            version_hash(1),
+        );
+        let blob = format!("{header}\n{entry}\n");
+        let back = RootKinograph::parse_str(&blob).unwrap();
+        assert!(back.entries[0].parents.is_empty());
     }
 
     #[test]

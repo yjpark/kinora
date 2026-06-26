@@ -122,13 +122,13 @@ impl Resolver {
         // Kinograph layout: committed root blobs. Under Never policy the
         // staged store events for owned kinos are pruned after archive —
         // the root kinograph is then the only on-disk record carrying
-        // (id, version, kind, metadata). Walk every root pointer and
-        // synthesize Identity entries for any (id, version) pair not
-        // already represented above. Synthesized events carry empty
-        // parents: build time's real parent chain is unrecoverable once
-        // staging is pruned, but head detection only needs hashes to
-        // match up — a later staged v2 with `parents=[v1.hash]` still
-        // correctly demotes the synthesized v1 from head to ancestor.
+        // (id, version, kind, metadata, parents). Walk every root pointer
+        // and synthesize Identity entries for any (id, version) pair not
+        // already represented above. Synthesized events carry the entry's
+        // recorded parents (the head event's parents, captured at commit
+        // time), so an ancestor version is demoted from head even when a
+        // kino's versions end up split across roots and every version has
+        // itself been pruned — see `resolver_chains_*` tests.
         ingest_root_kinographs(&kinora_root, &mut by_id)?;
 
         let identities: HashMap<String, Identity> = by_id
@@ -303,7 +303,7 @@ fn ingest_root_kinographs(
                 re.kind,
                 re.id.clone(),
                 re.version,
-                vec![],
+                re.parents,
                 re.head_ts,
                 String::new(),
                 String::new(),

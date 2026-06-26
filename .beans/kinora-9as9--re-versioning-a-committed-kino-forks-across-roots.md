@@ -5,7 +5,7 @@ status: in-progress
 type: bug
 priority: high
 created_at: 2026-06-26T00:47:51Z
-updated_at: 2026-06-26T00:48:05Z
+updated_at: 2026-06-26T00:53:18Z
 ---
 
 Revising a kino after it has been committed produces a fork: 'resolve' reports MultipleHeads and 'commit' becomes a no-op because no single head can be picked.
@@ -49,9 +49,9 @@ of `vec![]`, so an ancestor version is demoted even after it has been pruned.
 
 ## Plan
 
-- [ ] Add failing tests reproducing the cross-root fork (DONE - tests added)
-- [ ] Add `parents: Vec<String>` to `RootEntry` (root.rs) + styxl read/write, backward-compatible (absent = empty)
-- [ ] `build_root` (commit.rs) populates entry parents from the head event's parents
-- [ ] `ingest_root_kinographs` (resolve.rs) synthesizes with entry parents
-- [ ] Verify both new tests pass + full workspace suite green, zero warnings
+- [x] Add failing tests reproducing the cross-root fork
+- [x] Add `parents: Vec<String>` to `RootEntry` (root.rs) + styxl read/write, backward-compatible (absent = empty)
+- [x] `build_root` (commit.rs) populates entry parents from the head event's parents
+- [x] `ingest_root_kinographs` (resolve.rs) synthesizes with entry parents
+- [x] Verify both new tests pass + full workspace suite green, zero warnings
 - [ ] Code review pass
