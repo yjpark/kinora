@@ -776,4 +776,74 @@ mod tests {
             ResolveError::NotFound { .. }
         ));
     }
+
+    #[test]
+    fn revising_a_committed_kino_in_same_root_does_not_fork() {
+        // Full dogfooding loop: store v1 → assign main → commit (prunes v1),
+        // then revise to v2 with parents=[v1.hash] → assign main → commit
+        // (prunes v2). Resolving afterward must yield a single head (v2).
+        let (_t, root) = setup();
+        declare_main_never(&root);
+
+        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+        assign_to(&root, &v1.event.id, "main");
+        commit_main(&root);
+
+        let mut p = params("markdown", b"v2", "doc");
+        p.id = Some(v1.event.id.clone());
+        p.parents = vec![v1.event.hash.clone()];
+        p.ts = "2026-04-18T10:00:05Z".into();
+        let v2 = store_kino(&root, p).unwrap();
+        assign_to(&root, &v1.event.id, "main");
+        commit_main(&root);
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(&v1.event.id).unwrap();
+        assert_eq!(resolved.content, b"v2");
+        assert_eq!(resolved.head.hash, v2.event.hash);
+        assert_eq!(resolved.all_heads.len(), 1, "revision forked: {:?}", resolved.all_heads);
+    }
+
+    #[test]
+    fn revising_a_committed_kino_without_reassign_does_not_fork() {
+        // Same as above, but the revision is NOT reassigned. v2 routes to the
+        // default inbox while v1 stays in main. After committing both roots,
+        // each root synthesizes its entry with empty parents — the suspected
+        // fork trigger. Resolving must still yield a single head.
+        let (_t, root) = setup();
+        // Declare both main and inbox as never so both prune after commit.
+        std::fs::write(
+            config_path(&root),
+            "repo-url \"https://example.com/x.git\"\nroots {\n  main { policy \"never\" }\n  inbox { policy \"never\" }\n}\n",
+        )
+        .unwrap();
+
+        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+        assign_to(&root, &v1.event.id, "main");
+        commit_main(&root);
+
+        let mut p = params("markdown", b"v2", "doc");
+        p.id = Some(v1.event.id.clone());
+        p.parents = vec![v1.event.hash.clone()];
+        p.ts = "2026-04-18T10:00:05Z".into();
+        let v2 = store_kino(&root, p).unwrap();
+        // No reassign → v2 lands in inbox.
+        commit_main(&root);
+        commit_root(
+            &root,
+            "inbox",
+            CommitParams {
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-18T10:00:06Z".into(),
+            },
+        )
+        .unwrap();
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(&v1.event.id).unwrap();
+        assert_eq!(resolved.content, b"v2");
+        assert_eq!(resolved.head.hash, v2.event.hash);
+        assert_eq!(resolved.all_heads.len(), 1, "revision forked: {:?}", resolved.all_heads);
+    }
 }
