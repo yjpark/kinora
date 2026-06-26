@@ -168,15 +168,38 @@ pub fn format_store_json(stored: &StoredKino) -> String {
     };
     // facet_json serialization of a plain owned struct of String/bool fields
     // is infallible in practice; fall back to a hand-built object on the
-    // theoretical error path rather than panicking in a print path. All
-    // fields here are constrained (hex hashes, a namespace-validated kind,
-    // a bool), so the fallback needs no string escaping.
+    // theoretical error path rather than panicking in a print path. `id`,
+    // `hash`, and `event` are hex and `new_event` is a bool, but `kind` is
+    // free-form user input (namespace validation does not constrain its
+    // characters), so it must be JSON-escaped.
     facet_json::to_string(&out).unwrap_or_else(|_| {
         format!(
             "{{\"kind\":\"{}\",\"id\":\"{}\",\"hash\":\"{}\",\"event\":\"{}\",\"new_event\":{}}}",
-            out.kind, out.id, out.hash, out.event, out.new_event,
+            json_escape(&out.kind),
+            out.id,
+            out.hash,
+            out.event,
+            out.new_event,
         )
     })
+}
+
+/// Minimal JSON string escaping for the hand-built `--json` fallback path.
+/// Escapes the characters JSON requires; control chars become `\uXXXX`.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn read_content(path: Option<&str>) -> Result<Vec<u8>, CliError> {
@@ -491,6 +514,15 @@ mod tests {
         // No `=`-delimited footgun; it's a JSON object.
         assert!(json.starts_with('{') && json.ends_with('}'), "got: {json}");
         assert!(!json.contains("id="), "must not use key=value form: {json}");
+    }
+
+    #[test]
+    fn json_escape_handles_quotes_backslashes_and_controls() {
+        assert_eq!(json_escape("plain"), "plain");
+        assert_eq!(json_escape(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("a\u{0001}b"), "a\\u0001b");
     }
 
     #[test]

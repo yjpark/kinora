@@ -578,9 +578,10 @@ fn route_kino(
 /// root (see [`route_kino`]). Roots are visited in sorted name order so a
 /// (rare, pre-phase-3) duplicate id resolves deterministically (last wins).
 ///
-/// Unreadable pointers / missing or unparseable blobs are skipped rather
-/// than failing the commit — a broken sibling root shouldn't strand routing
-/// for the healthy ones.
+/// Missing pointers and unreadable/unparseable blobs are skipped rather than
+/// failing the commit — a broken sibling root shouldn't strand routing for
+/// the healthy ones. (A hard pointer-read I/O error still propagates, matching
+/// every other `read_root_pointer` call site.)
 fn collect_root_ownership(
     kinora_root: &Path,
     declared_roots: &BTreeSet<String>,
@@ -3744,6 +3745,71 @@ roots {
             inbox_kg.entries.iter().any(|e| e.id == fresh.id),
             "brand-new unassigned kino should default to inbox",
         );
+    }
+
+    #[test]
+    fn sibling_root_commit_does_not_prune_inherited_revision() {
+        // Archive/prune ownership must match build_root's routing. Two never
+        // roots: v1 -> main. Then a bare revision v2 (inherits main) is staged
+        // alongside a brand-new kino `w` that routes to inbox. In one
+        // commit_all, inbox commits before main and produces a version (for
+        // `w`) — it must NOT archive/prune v2 just because v2 has no assign,
+        // or v2's staged event would vanish before main ever commits it.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+  inbox { policy "never" }
+}
+"#,
+        );
+
+        let v1 = store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
+        write_assign(
+            &root,
+            &AssignEvent {
+                kino_id: v1.id.clone(),
+                target_root: "main".into(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-19T10:00:01Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // Bare revision of v1 (inherits main), and a brand-new inbox kino.
+        store_kino(
+            &root,
+            StoreKinoParams {
+                kind: "markdown".into(),
+                content: b"v2".to_vec(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-19T10:00:03Z".into(),
+                metadata: BTreeMap::from([("name".into(), "doc".into())]),
+                id: Some(v1.id.clone()),
+                parents: vec![v1.hash.clone()],
+            },
+        )
+        .unwrap();
+        store_md(&root, b"w", "w", "2026-04-19T10:00:04Z");
+
+        commit_all(&root, params("yj", "2026-04-19T10:00:05Z")).unwrap();
+
+        // main must hold v2 — the revision survived inbox's commit step.
+        let store = ContentStore::new(&root);
+        let main_hash = read_root_pointer(&root, "main").unwrap().expect("main pointer");
+        let main_kg = RootKinograph::parse(&store.read(&main_hash).unwrap()).unwrap();
+        let entry = main_kg
+            .entries
+            .iter()
+            .find(|e| e.id == v1.id)
+            .expect("kino must remain in main");
+        assert_ne!(entry.version, v1.hash, "main must advance to v2, not keep v1");
     }
 
     #[test]

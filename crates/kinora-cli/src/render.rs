@@ -100,8 +100,11 @@ pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliEr
 ///
 /// Returns `false` (no warning) on any error or when there's nothing to
 /// compare: not a git repo, an unborn HEAD, or no `.kinora/` committed yet.
-/// A false positive (warning when state is actually fine) is harmless; this
-/// never blocks or fails the render.
+/// A false positive is harmless (advisory only); this never blocks or fails
+/// the render. Note the comparison is a raw filesystem-vs-tree diff with no
+/// git-ignore awareness — a git-ignored or untracked file placed under
+/// `.kinora/` would also trip the warning. In a normal repo `.kinora/` is
+/// fully tracked, so this is correct in practice.
 fn working_tree_has_uncommitted_kino_state(repo_root: &Path, kin_root: &Path) -> bool {
     let Ok(repo) = gix::open(repo_root) else {
         return false;
