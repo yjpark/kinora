@@ -128,7 +128,9 @@ impl Resolver {
         // recorded parents (the head event's parents, captured at commit
         // time), so an ancestor version is demoted from head even when a
         // kino's versions end up split across roots and every version has
-        // itself been pruned — see `resolver_chains_*` tests.
+        // itself been pruned — see
+        // `revising_a_committed_kino_without_reassign_does_not_fork` and
+        // `revising_a_committed_kino_chain_split_across_roots_does_not_fork`.
         ingest_root_kinographs(&kinora_root, &mut by_id)?;
 
         let identities: HashMap<String, Identity> = by_id
@@ -249,8 +251,17 @@ impl Resolver {
 
 /// Walk `.kinora/roots/` pointer files and synthesize identity entries from
 /// each committed root kinograph's entries. Only (id, version) pairs that
-/// aren't already represented in `by_id` are added — staged events win on
-/// conflict because they carry authentic parents, timestamps, and authors.
+/// aren't already represented in `by_id` (staged events) are added — staged
+/// events win on conflict because they carry authentic parents, timestamps,
+/// and authors.
+///
+/// Root pointers are processed in sorted name order so the result is
+/// reproducible regardless of filesystem `read_dir` order. When the same
+/// (id, version) is listed by more than one root with differing `parents`
+/// (e.g. a merge stored as `--parents a,b` in one root and a plain revision
+/// in another), the synthesized event's parents are the **union** across all
+/// roots — head detection only cares that every genuine ancestor is named, so
+/// unioning is order-independent and conservative.
 ///
 /// Returns early when the roots dir is absent (e.g. a fresh `kinora init`
 /// before any commit has run) — this is the common case and not an error.
@@ -265,35 +276,58 @@ fn ingest_root_kinographs(
         Err(e) => return Err(e.into()),
     };
 
-    // Mutable so newly-synthesized entries also block re-synthesis when
-    // the next root kinograph happens to list the same (id, version).
-    let mut seen_id_version: HashSet<(String, String)> = by_id
+    // (id, version) pairs already carried by authentic staged events; root
+    // entries for these are skipped entirely (staged wins).
+    let staged_pairs: HashSet<(String, String)> = by_id
         .iter()
         .flat_map(|(_, events)| events.iter().map(|(_, e)| (e.id.clone(), e.hash.clone())))
         .collect();
 
-    let store = ContentStore::new(kinora_root);
+    // Collect and sort root pointer names for deterministic iteration.
+    let mut names: Vec<String> = Vec::new();
     for entry in dir_iter {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
         }
-        let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => continue,
+        let Some(name_str) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
         };
         // Skip `.<name>.tmp` atomic-rename sidecars.
         if name_str.starts_with('.') {
             continue;
         }
-        let Some(root_hash) = read_root_pointer_local(kinora_root, name_str)? else {
+        names.push(name_str);
+    }
+    names.sort();
+
+    // Location of each synthesized (id, version) within `by_id`, so a later
+    // root listing the same pair can union its parents into the existing
+    // synthesized event rather than producing a duplicate head.
+    let mut synth_loc: HashMap<(String, String), usize> = HashMap::new();
+
+    let store = ContentStore::new(kinora_root);
+    for name_str in names {
+        let Some(root_hash) = read_root_pointer_local(kinora_root, &name_str)? else {
             continue;
         };
         let bytes = store.read(&root_hash)?;
         let kg = RootKinograph::parse(&bytes)?;
         for re in kg.entries {
-            if !seen_id_version.insert((re.id.clone(), re.version.clone())) {
+            let key = (re.id.clone(), re.version.clone());
+            if staged_pairs.contains(&key) {
+                continue;
+            }
+            if let Some(&idx) = synth_loc.get(&key) {
+                // Already synthesized from an earlier root: union parents so
+                // an ancestor named by any root is demoted from head.
+                let events = by_id.get_mut(&re.id).expect("synth id present");
+                let existing = &mut events[idx].1;
+                for p in re.parents {
+                    if !existing.parents.contains(&p) {
+                        existing.parents.push(p);
+                    }
+                }
                 continue;
             }
             let lineage = Hash::from_str(&re.version)
@@ -309,10 +343,9 @@ fn ingest_root_kinographs(
                 String::new(),
                 re.metadata,
             );
-            by_id
-                .entry(re.id.clone())
-                .or_default()
-                .push((lineage, synth));
+            let events = by_id.entry(re.id.clone()).or_default();
+            synth_loc.insert(key, events.len());
+            events.push((lineage, synth));
         }
     }
     Ok(())
@@ -845,5 +878,115 @@ mod tests {
         assert_eq!(resolved.content, b"v2");
         assert_eq!(resolved.head.hash, v2.event.hash);
         assert_eq!(resolved.all_heads.len(), 1, "revision forked: {:?}", resolved.all_heads);
+    }
+
+    #[test]
+    fn revising_a_committed_kino_chain_split_across_roots_does_not_fork() {
+        // Three versions of one kino, each landing in (and pruned from) a
+        // different never-policy root: v1 -> main, v2 -> inbox, v3 -> side.
+        // The resolver must reconstruct the v1<-v2<-v3 chain from the entry
+        // parents and report v3 as the sole head.
+        let (_t, root) = setup();
+        std::fs::write(
+            config_path(&root),
+            "repo-url \"https://example.com/x.git\"\nroots {\n  main { policy \"never\" }\n  inbox { policy \"never\" }\n  side { policy \"never\" }\n}\n",
+        )
+        .unwrap();
+
+        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+        assign_to(&root, &v1.event.id, "main");
+        commit_main(&root);
+
+        let commit_root_named = |name: &str, ts: &str| {
+            commit_root(
+                &root,
+                name,
+                CommitParams {
+                    author: "yj".into(),
+                    provenance: "test".into(),
+                    ts: ts.into(),
+                },
+            )
+            .unwrap();
+        };
+
+        // v2 -> inbox (no reassign, default routing).
+        let mut p2 = params("markdown", b"v2", "doc");
+        p2.id = Some(v1.event.id.clone());
+        p2.parents = vec![v1.event.hash.clone()];
+        p2.ts = "2026-04-18T10:00:05Z".into();
+        let v2 = store_kino(&root, p2).unwrap();
+        commit_root_named("inbox", "2026-04-18T10:00:06Z");
+
+        // v3 -> side (explicit reassign).
+        let mut p3 = params("markdown", b"v3", "doc");
+        p3.id = Some(v1.event.id.clone());
+        p3.parents = vec![v2.event.hash.clone()];
+        p3.ts = "2026-04-18T10:00:07Z".into();
+        let v3 = store_kino(&root, p3).unwrap();
+        write_assign(
+            &root,
+            &AssignEvent {
+                kino_id: v1.event.id.clone(),
+                target_root: "side".into(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-18T10:00:08Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+        commit_root_named("side", "2026-04-18T10:00:09Z");
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(&v1.event.id).unwrap();
+        assert_eq!(resolved.content, b"v3");
+        assert_eq!(resolved.head.hash, v3.event.hash);
+        assert_eq!(resolved.all_heads.len(), 1, "chain forked: {:?}", resolved.all_heads);
+    }
+
+    #[test]
+    fn ingest_unions_parents_when_same_version_listed_by_two_roots() {
+        // The same (id, version) head entry can appear in two roots carrying
+        // different parents (e.g. one root records the lineage, another lists
+        // it parent-less). The resolver must UNION the parents across roots —
+        // not take whichever it reads first — so an ancestor named by any
+        // root is demoted. The parent-less copy is given the alphabetically
+        // first root name so a naive first-wins would drop the lineage and
+        // fork; the union must still demote the ancestor.
+        let (_t, root) = setup();
+        let store = ContentStore::new(&root);
+        store.ensure_layout().unwrap();
+
+        let anc = store.write("markdown", b"ancestor").unwrap();
+        let head = store.write("markdown", b"head").unwrap();
+        let id = head.as_hex(); // identity id (shared lineage)
+        let meta = BTreeMap::from([("name".into(), "doc".into())]);
+
+        // Root "a" (sorts first): head entry with NO parents.
+        let kg_a = crate::root::RootKinograph::with_entries(vec![
+            crate::root::RootEntry::new(id, head.as_hex(), "markdown", meta.clone(), ""),
+        ]);
+        // Root "b": head entry naming `anc` as parent.
+        let kg_b = crate::root::RootKinograph::with_entries(vec![
+            crate::root::RootEntry::new(id, head.as_hex(), "markdown", meta.clone(), "")
+                .with_parents(vec![anc.as_hex().to_owned()]),
+        ]);
+        // Root "c": the ancestor version of the same identity.
+        let kg_c = crate::root::RootKinograph::with_entries(vec![
+            crate::root::RootEntry::new(id, anc.as_hex(), "markdown", meta.clone(), ""),
+        ]);
+
+        let roots = crate::paths::roots_dir(&root);
+        std::fs::create_dir_all(&roots).unwrap();
+        for (name, kg) in [("a", kg_a), ("b", kg_b), ("c", kg_c)] {
+            let h = store.write("root", &kg.to_styxl().unwrap().into_bytes()).unwrap();
+            std::fs::write(roots.join(name), h.as_hex()).unwrap();
+        }
+
+        let resolver = Resolver::load(&root).unwrap();
+        let resolved = resolver.resolve_by_id(id).unwrap();
+        assert_eq!(resolved.content, b"head");
+        assert_eq!(resolved.all_heads.len(), 1, "parent union failed: {:?}", resolved.all_heads);
     }
 }

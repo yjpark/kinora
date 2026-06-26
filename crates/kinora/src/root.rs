@@ -329,6 +329,12 @@ fn validate_entry(idx: usize, entry: &RootEntry) -> Result<(), RootError> {
         idx,
         reason: format!("version is not a valid 64-hex hash: {e}"),
     })?;
+    for parent in &entry.parents {
+        Hash::from_str(parent).map_err(|e| RootError::InvalidEntry {
+            idx,
+            reason: format!("parent is not a valid 64-hex hash: {e}"),
+        })?;
+    }
     namespace::validate_kind(&entry.kind).map_err(|e: NamespaceError| {
         RootError::InvalidEntry {
             idx,
@@ -543,6 +549,15 @@ mod tests {
         let back = RootKinograph::parse_str(&s).unwrap();
         assert_eq!(back.entries[0], e);
         assert_eq!(back.entries[0].parents, vec![version_hash(3), version_hash(2)]);
+    }
+
+    #[test]
+    fn invalid_parent_hash_rejected() {
+        let e = sample_entry(1).with_parents(vec!["not-a-hash".into()]);
+        let r = RootKinograph::with_entries(vec![e]);
+        let s = r.to_styxl().unwrap();
+        let err = RootKinograph::parse_str(&s).unwrap_err();
+        assert!(matches!(err, RootError::InvalidEntry { .. }), "got: {err:?}");
     }
 
     #[test]
