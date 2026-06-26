@@ -191,6 +191,13 @@ fn run() -> ExitCode {
                         source_note,
                         report.cache_path.display(),
                     );
+                    if report.uncommitted_kino_state {
+                        eprintln!(
+                            "warning: working-tree .kinora/ has uncommitted changes; \
+                             render reflects the last git-committed state. Run \
+                             `git commit` after `kinora commit` to include them."
+                        );
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => report_err("render", e),

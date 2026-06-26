@@ -30,6 +30,12 @@ pub struct RenderReport {
     /// `0` means the render fell back to the working-copy layout — either
     /// because the repo isn't a git repo or no branch has `.kinora/` yet.
     pub source_count: usize,
+    /// True when the working-tree `.kinora/` differs from the version
+    /// committed at the current branch HEAD. render reads committed git
+    /// state, so this flags the store -> `kinora commit` -> `git commit` ->
+    /// render footgun: local kino activity not yet `git commit`-ed is
+    /// silently absent from the rendered book. Advisory only.
+    pub uncommitted_kino_state: bool,
 }
 
 pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliError> {
@@ -71,12 +77,86 @@ pub fn run_render(cwd: &Path, args: RenderRunArgs) -> Result<RenderReport, CliEr
     };
     write_book(&cache_path, &title, &book)?;
 
+    let uncommitted_kino_state =
+        working_tree_has_uncommitted_kino_state(&repo_root, &kin_root);
+
     Ok(RenderReport {
         cache_path,
         page_count,
         skipped_count,
         source_count,
+        uncommitted_kino_state,
     })
+}
+
+/// Best-effort check: does the working-tree `.kinora/` differ from the
+/// version committed at the current branch HEAD?
+///
+/// render reads committed git state (see `render_from_git`), so local kino
+/// activity that has been `kinora commit`-ed but not yet `git commit`-ed —
+/// or not committed at all — is invisible to the rendered book. This drives
+/// an advisory warning so the store -> commit -> git commit -> render loop's
+/// stale-render footgun is visible.
+///
+/// Returns `false` (no warning) on any error or when there's nothing to
+/// compare: not a git repo, an unborn HEAD, or no `.kinora/` committed yet.
+/// A false positive (warning when state is actually fine) is harmless; this
+/// never blocks or fails the render.
+fn working_tree_has_uncommitted_kino_state(repo_root: &Path, kin_root: &Path) -> bool {
+    let Ok(repo) = gix::open(repo_root) else {
+        return false;
+    };
+    let Ok(head) = repo.head_id() else {
+        return false;
+    };
+    let Ok(scratch) = TempDir::new() else {
+        return false;
+    };
+    // SubtreeAbsent (no `.kinora/` at HEAD yet) or any other extract error →
+    // nothing meaningful to compare, so stay quiet.
+    if extract_subtree(&repo, head.detach(), ".kinora", scratch.path()).is_err() {
+        return false;
+    }
+    dirs_differ(scratch.path(), kin_root).unwrap_or(false)
+}
+
+/// Recursively compare two directories for byte-equality: same set of
+/// relative file paths, identical contents. Returns `Ok(true)` if they
+/// differ in any file (added, removed, or changed).
+fn dirs_differ(a: &Path, b: &Path) -> io::Result<bool> {
+    let files_a = collect_rel_files(a)?;
+    let files_b = collect_rel_files(b)?;
+    if files_a != files_b {
+        return Ok(true);
+    }
+    for rel in &files_a {
+        if std::fs::read(a.join(rel))? != std::fs::read(b.join(rel))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Collect the set of file paths under `root`, relative to `root`.
+/// Directories are descended; only file leaves are recorded.
+fn collect_rel_files(root: &Path) -> io::Result<std::collections::BTreeSet<PathBuf>> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file()
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                out.insert(rel.to_path_buf());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Carries the rendered Book plus the scratch tempdirs whose contents
@@ -800,6 +880,103 @@ mod tests {
             dirs.iter().any(|f| f.starts_with("worktree-")),
             "expected a worktree-* group for detached HEAD: {dirs:?}",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Uncommitted kino-state warning (kinora-19iq)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dirs_differ_detects_added_removed_and_changed_files() {
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        std::fs::write(a.path().join("x"), b"1").unwrap();
+        std::fs::write(b.path().join("x"), b"1").unwrap();
+        assert!(!dirs_differ(a.path(), b.path()).unwrap(), "identical dirs");
+
+        // Changed content.
+        std::fs::write(b.path().join("x"), b"2").unwrap();
+        assert!(dirs_differ(a.path(), b.path()).unwrap(), "changed file");
+
+        // Added file (restore x, add y to b).
+        std::fs::write(b.path().join("x"), b"1").unwrap();
+        std::fs::write(b.path().join("y"), b"z").unwrap();
+        assert!(dirs_differ(a.path(), b.path()).unwrap(), "added file");
+    }
+
+    #[test]
+    fn dirs_differ_recurses_into_subdirs() {
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        std::fs::create_dir_all(a.path().join("sub")).unwrap();
+        std::fs::create_dir_all(b.path().join("sub")).unwrap();
+        std::fs::write(a.path().join("sub/f"), b"same").unwrap();
+        std::fs::write(b.path().join("sub/f"), b"same").unwrap();
+        assert!(!dirs_differ(a.path(), b.path()).unwrap());
+        std::fs::write(b.path().join("sub/f"), b"diff").unwrap();
+        assert!(dirs_differ(a.path(), b.path()).unwrap());
+    }
+
+    #[test]
+    fn render_flags_uncommitted_kino_state() {
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        // Commit an initial .kinora/ so HEAD has a subtree to compare against.
+        store_kino(&kin, params(b"# alpha\n", "alpha")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "seed kinora"], tmp.path());
+
+        // Now store a kino WITHOUT git-committing it.
+        store_kino(&kin, params(b"# beta\n", "beta")).unwrap();
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        assert!(
+            report.uncommitted_kino_state,
+            "expected uncommitted-state warning flag, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn render_does_not_flag_when_kino_state_is_committed() {
+        let tmp = TempDir::new().unwrap();
+        git_init(tmp.path());
+        init(tmp.path(), "https://github.com/edger-dev/kinora").unwrap();
+        let kin = kinora_root(tmp.path());
+
+        store_kino(&kin, params(b"# alpha\n", "alpha")).unwrap();
+        git(&["add", "-A"], tmp.path());
+        git(&["commit", "-m", "seed kinora"], tmp.path());
+
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        assert!(
+            !report.uncommitted_kino_state,
+            "clean working tree should not flag, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn render_does_not_flag_non_git_repo() {
+        // Non-git repo: nothing to compare against, so no warning.
+        let tmp = repo();
+        let kin = kinora_root(tmp.path());
+        store_kino(&kin, params(b"# hello\n", "greet")).unwrap();
+        let cache = TempDir::new().unwrap();
+        let args = RenderRunArgs {
+            cache_dir: Some(cache.path().to_string_lossy().into_owned()),
+        };
+        let report = run_render(tmp.path(), args).unwrap();
+        assert!(!report.uncommitted_kino_state);
     }
 
     #[test]
