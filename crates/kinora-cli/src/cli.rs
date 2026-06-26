@@ -9,6 +9,11 @@ pub struct Cli {
     #[facet(args::named, args::short = 'C', default)]
     pub repo_root: Option<String>,
 
+    /// Emit machine-readable JSON instead of the human-readable summary.
+    /// Currently honored by `store`; other commands ignore it for now.
+    #[facet(args::named, default)]
+    pub json: bool,
+
     #[facet(args::subcommand)]
     pub command: Command,
 

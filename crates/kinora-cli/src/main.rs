@@ -19,7 +19,7 @@ use resolve::{
     ResolveRunArgs,
 };
 use rootcause::Report;
-use store::{format_store_summary, run_store, StoreRunArgs};
+use store::{format_store_json, format_store_summary, run_store, StoreRunArgs};
 
 mod assign;
 mod cli;
@@ -121,6 +121,8 @@ fn run() -> ExitCode {
     };
     let cwd = effective_cwd;
 
+    let json_output = cli.json;
+
     match cli.command {
         Command::Store {
             kind,
@@ -148,7 +150,11 @@ fn run() -> ExitCode {
             };
             match run_store(&cwd, args) {
                 Ok(stored) => {
-                    println!("{}", format_store_summary(&stored));
+                    if json_output {
+                        println!("{}", format_store_json(&stored));
+                    } else {
+                        println!("{}", format_store_summary(&stored));
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => report_err("store", e),
