@@ -19,7 +19,7 @@ use resolve::{
     ResolveRunArgs,
 };
 use rootcause::Report;
-use store::{format_store_summary, run_store, StoreRunArgs};
+use store::{format_store_json, format_store_summary, run_store, StoreRunArgs};
 
 mod assign;
 mod cli;
@@ -121,6 +121,8 @@ fn run() -> ExitCode {
     };
     let cwd = effective_cwd;
 
+    let json_output = cli.json;
+
     match cli.command {
         Command::Store {
             kind,
@@ -148,7 +150,11 @@ fn run() -> ExitCode {
             };
             match run_store(&cwd, args) {
                 Ok(stored) => {
-                    println!("{}", format_store_summary(&stored));
+                    if json_output {
+                        println!("{}", format_store_json(&stored));
+                    } else {
+                        println!("{}", format_store_summary(&stored));
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => report_err("store", e),
@@ -185,6 +191,13 @@ fn run() -> ExitCode {
                         source_note,
                         report.cache_path.display(),
                     );
+                    if report.uncommitted_kino_state {
+                        eprintln!(
+                            "warning: working-tree .kinora/ has uncommitted changes; \
+                             render reflects the last git-committed state. Run \
+                             `git commit` after `kinora commit` to include them."
+                        );
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => report_err("render", e),

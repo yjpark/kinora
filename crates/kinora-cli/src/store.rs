@@ -143,6 +143,65 @@ pub fn format_store_summary(stored: &StoredKino) -> String {
     )
 }
 
+/// Stable machine-readable shape of a `kinora store` result, emitted under
+/// `--json`. Field names are part of the CLI contract — additive changes
+/// only. `event` is the event shorthash; `new_event` mirrors the human
+/// summary's `(new event)` suffix.
+#[derive(facet::Facet)]
+struct StoreJson {
+    kind: String,
+    id: String,
+    hash: String,
+    event: String,
+    new_event: bool,
+}
+
+/// Serialize a successful store as a single-line JSON object for scripting.
+/// Solves the `id=<hash>` mis-parse footgun of the human summary.
+pub fn format_store_json(stored: &StoredKino) -> String {
+    let out = StoreJson {
+        kind: stored.event.kind.clone(),
+        id: stored.event.id.clone(),
+        hash: stored.event.hash.clone(),
+        event: stored.lineage.clone(),
+        new_event: stored.was_new_lineage,
+    };
+    // facet_json serialization of a plain owned struct of String/bool fields
+    // is infallible in practice; fall back to a hand-built object on the
+    // theoretical error path rather than panicking in a print path. `id`,
+    // `hash`, and `event` are hex and `new_event` is a bool, but `kind` is
+    // free-form user input (namespace validation does not constrain its
+    // characters), so it must be JSON-escaped.
+    facet_json::to_string(&out).unwrap_or_else(|_| {
+        format!(
+            "{{\"kind\":\"{}\",\"id\":\"{}\",\"hash\":\"{}\",\"event\":\"{}\",\"new_event\":{}}}",
+            json_escape(&out.kind),
+            out.id,
+            out.hash,
+            out.event,
+            out.new_event,
+        )
+    })
+}
+
+/// Minimal JSON string escaping for the hand-built `--json` fallback path.
+/// Escapes the characters JSON requires; control chars become `\uXXXX`.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn read_content(path: Option<&str>) -> Result<Vec<u8>, CliError> {
     match path {
         Some(p) => Ok(fs::read(p)?),
@@ -439,6 +498,39 @@ mod tests {
             "bb".repeat(32),
         );
         assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn format_store_json_emits_parseable_fields() {
+        let stored = stubbed_stored_kino(true);
+        let json = format_store_json(&stored);
+        // Round-trips through a JSON parser and carries the stable fields.
+        let parsed: StoreJson = facet_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed.kind, "markdown");
+        assert_eq!(parsed.id, "aa".repeat(32));
+        assert_eq!(parsed.hash, "bb".repeat(32));
+        assert_eq!(parsed.event, "deadbeef");
+        assert!(parsed.new_event);
+        // No `=`-delimited footgun; it's a JSON object.
+        assert!(json.starts_with('{') && json.ends_with('}'), "got: {json}");
+        assert!(!json.contains("id="), "must not use key=value form: {json}");
+    }
+
+    #[test]
+    fn json_escape_handles_quotes_backslashes_and_controls() {
+        assert_eq!(json_escape("plain"), "plain");
+        assert_eq!(json_escape(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("a\u{0001}b"), "a\\u0001b");
+    }
+
+    #[test]
+    fn format_store_json_reflects_idempotent_restore() {
+        let stored = stubbed_stored_kino(false);
+        let json = format_store_json(&stored);
+        let parsed: StoreJson = facet_json::from_str(&json).expect("valid json");
+        assert!(!parsed.new_event);
     }
 
     // ---- --root atomic-pair tests (g08g Phase B) ----

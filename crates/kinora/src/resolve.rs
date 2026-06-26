@@ -882,20 +882,19 @@ mod tests {
 
     #[test]
     fn revising_a_committed_kino_chain_split_across_roots_does_not_fork() {
-        // Three versions of one kino, each landing in (and pruned from) a
-        // different never-policy root: v1 -> main, v2 -> inbox, v3 -> side.
-        // The resolver must reconstruct the v1<-v2<-v3 chain from the entry
-        // parents and report v3 as the sole head.
+        // Three versions of one kino deliberately split across three
+        // never-policy roots via explicit assigns: v1 -> main, v2 -> inbox,
+        // v3 -> side. Each is committed and pruned, so all three survive only
+        // as synthesized root entries. The resolver must reconstruct the
+        // v1<-v2<-v3 chain from the entry parents and report v3 as the sole
+        // head. (A *bare* revision would instead inherit its root — see
+        // kinora-egur — so the split here is forced with explicit assigns.)
         let (_t, root) = setup();
         std::fs::write(
             config_path(&root),
             "repo-url \"https://example.com/x.git\"\nroots {\n  main { policy \"never\" }\n  inbox { policy \"never\" }\n  side { policy \"never\" }\n}\n",
         )
         .unwrap();
-
-        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
-        assign_to(&root, &v1.event.id, "main");
-        commit_main(&root);
 
         let commit_root_named = |name: &str, ts: &str| {
             commit_root(
@@ -909,33 +908,41 @@ mod tests {
             )
             .unwrap();
         };
+        let assign_at = |id: &str, target: &str, ts: &str| {
+            write_assign(
+                &root,
+                &AssignEvent {
+                    kino_id: id.to_owned(),
+                    target_root: target.to_owned(),
+                    supersedes: vec![],
+                    author: "yj".into(),
+                    ts: ts.into(),
+                    provenance: "test".into(),
+                },
+            )
+            .unwrap();
+        };
 
-        // v2 -> inbox (no reassign, default routing).
+        let v1 = store_kino(&root, params("markdown", b"v1", "doc")).unwrap();
+        assign_at(&v1.event.id, "main", "2026-04-18T10:00:01Z");
+        commit_root_named("main", "2026-04-18T10:00:02Z");
+
+        // v2 -> inbox (explicit assign).
         let mut p2 = params("markdown", b"v2", "doc");
         p2.id = Some(v1.event.id.clone());
         p2.parents = vec![v1.event.hash.clone()];
         p2.ts = "2026-04-18T10:00:05Z".into();
         let v2 = store_kino(&root, p2).unwrap();
+        assign_at(&v1.event.id, "inbox", "2026-04-18T10:00:05Z");
         commit_root_named("inbox", "2026-04-18T10:00:06Z");
 
-        // v3 -> side (explicit reassign).
+        // v3 -> side (explicit assign).
         let mut p3 = params("markdown", b"v3", "doc");
         p3.id = Some(v1.event.id.clone());
         p3.parents = vec![v2.event.hash.clone()];
         p3.ts = "2026-04-18T10:00:07Z".into();
         let v3 = store_kino(&root, p3).unwrap();
-        write_assign(
-            &root,
-            &AssignEvent {
-                kino_id: v1.event.id.clone(),
-                target_root: "side".into(),
-                supersedes: vec![],
-                author: "yj".into(),
-                ts: "2026-04-18T10:00:08Z".into(),
-                provenance: "test".into(),
-            },
-        )
-        .unwrap();
+        assign_at(&v1.event.id, "side", "2026-04-18T10:00:08Z");
         commit_root_named("side", "2026-04-18T10:00:09Z");
 
         let resolver = Resolver::load(&root).unwrap();

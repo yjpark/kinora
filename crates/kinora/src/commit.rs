@@ -411,6 +411,7 @@ pub fn build_root(
     events: &[Event],
     root_name: &str,
     declared_roots: &BTreeSet<String>,
+    owned: &BTreeMap<String, String>,
     prior_root: Option<&RootKinograph>,
 ) -> Result<RootKinograph, CommitError> {
     let live_assigns = collect_live_assigns(events)?;
@@ -428,8 +429,7 @@ pub fn build_root(
 
     let mut entries: Vec<RootEntry> = Vec::with_capacity(by_id.len());
     for (id, group) in by_id {
-        let target = kino_target_root(&id, &live_assigns, declared_roots)?;
-        let target_name = target.as_deref().unwrap_or("inbox");
+        let target_name = route_kino(&id, &live_assigns, declared_roots, owned)?;
         if target_name != root_name {
             continue;
         }
@@ -550,6 +550,58 @@ fn kino_target_root(
     }
 }
 
+/// Decide which root a kino belongs to during a fresh build.
+///
+/// Precedence:
+/// 1. An explicit **live assign** wins (the user pinned it this round).
+/// 2. Otherwise the kino **inherits the root that currently owns it**
+///    (`owned`, built from the prior committed roots) — so a revision of an
+///    already-committed kino stays where its predecessor lives instead of
+///    silently falling to `inbox`. This is what fixes the "metadata-only
+///    rename not reflected in the committed root" footgun (kinora-egur) and
+///    keeps re-versioning from splitting a kino across roots.
+/// 3. A brand-new kino with no prior owner and no assign defaults to `inbox`.
+fn route_kino(
+    id: &str,
+    live_assigns: &[(Hash, AssignEvent)],
+    declared_roots: &BTreeSet<String>,
+    owned: &BTreeMap<String, String>,
+) -> Result<String, CommitError> {
+    match kino_target_root(id, live_assigns, declared_roots)? {
+        Some(t) => Ok(t),
+        None => Ok(owned.get(id).cloned().unwrap_or_else(|| "inbox".to_owned())),
+    }
+}
+
+/// Build the kino-id -> owning-root map from every declared root's prior
+/// committed kinograph. Used so an unassigned revision inherits its current
+/// root (see [`route_kino`]). Roots are visited in sorted name order so a
+/// (rare, pre-phase-3) duplicate id resolves deterministically (last wins).
+///
+/// Missing pointers and unreadable/unparseable blobs are skipped rather than
+/// failing the commit — a broken sibling root shouldn't strand routing for
+/// the healthy ones. (A hard pointer-read I/O error still propagates, matching
+/// every other `read_root_pointer` call site.)
+fn collect_root_ownership(
+    kinora_root: &Path,
+    declared_roots: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>, CommitError> {
+    let store = ContentStore::new(kinora_root);
+    let mut owned: BTreeMap<String, String> = BTreeMap::new();
+    // BTreeSet already yields sorted names; iterate explicitly for clarity.
+    for root_name in declared_roots {
+        let Some(hash) = read_root_pointer(kinora_root, root_name)? else {
+            continue;
+        };
+        let Ok(bytes) = store.read(&hash) else { continue };
+        let Ok(kg) = RootKinograph::parse(&bytes) else { continue };
+        for entry in kg.entries {
+            owned.insert(entry.id, root_name.clone());
+        }
+    }
+    Ok(owned)
+}
+
 fn pick_head<'a>(id: &str, events: &[&'a Event]) -> Result<&'a Event, CommitError> {
     let referenced: HashSet<&str> = events
         .iter()
@@ -596,6 +648,7 @@ pub fn commit_root(
     let events = ledger.read_all_events()?;
 
     let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
+    let owned = collect_root_ownership(kinora_root, &declared_roots)?;
     commit_root_with_refs(
         kinora_root,
         root_name,
@@ -603,6 +656,7 @@ pub fn commit_root(
         &config,
         &declared_roots,
         &events,
+        &owned,
         &refs,
     )
 }
@@ -620,6 +674,7 @@ fn commit_root_with_refs(
     config: &Config,
     declared_roots: &BTreeSet<String>,
     events: &[Event],
+    owned: &BTreeMap<String, String>,
     refs: &ExternalRefs,
 ) -> Result<CommitResult, CommitError> {
     validate_root_name(root_name)?;
@@ -653,7 +708,7 @@ fn commit_root_with_refs(
     let merge_source = matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
         .then_some(prior_root.as_ref())
         .flatten();
-    let mut root = build_root(events, root_name, declared_roots, merge_source)?;
+    let mut root = build_root(events, root_name, declared_roots, owned, merge_source)?;
     propagate_pins(&mut root, prior_root.as_ref());
 
     let implicit_pinned = refs.implicit_pinned_versions(root_name);
@@ -741,6 +796,7 @@ fn commit_root_with_refs(
             root_name,
             events,
             declared_roots,
+            owned,
             &params,
         )?
         && matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
@@ -761,8 +817,9 @@ fn commit_root_with_refs(
         && result.new_version.is_some()
         && matches!(policy, RootPolicy::Never | RootPolicy::MaxAge(_))
     {
-        let owned = collect_owned_staged_events(events, root_name, declared_roots)?;
-        let owned_hashes: Vec<Hash> = owned
+        let owned_events =
+            collect_owned_staged_events(events, root_name, declared_roots, owned)?;
+        let owned_hashes: Vec<Hash> = owned_events
             .iter()
             .map(|e| e.event_hash())
             .collect::<Result<_, _>>()?;
@@ -777,6 +834,7 @@ fn commit_root_with_refs(
         events,
         root_name,
         declared_roots,
+        owned,
         &root,
         &policy,
         &implicit_pinned,
@@ -793,6 +851,7 @@ fn collect_owned_staged_events<'e>(
     events: &'e [Event],
     root_name: &str,
     declared_roots: &BTreeSet<String>,
+    owned_roots: &BTreeMap<String, String>,
 ) -> Result<Vec<&'e Event>, CommitError> {
     let live_assigns = collect_live_assigns(events)?;
     let mut owned: Vec<&Event> = Vec::new();
@@ -810,9 +869,10 @@ fn collect_owned_staged_events<'e>(
         if !e.is_store_event() || e.kind == "root" {
             continue;
         }
-        let target = kino_target_root(&e.id, &live_assigns, declared_roots)?;
-        let target_name = target.as_deref().unwrap_or("inbox");
-        if target_name == root_name {
+        // Must match `build_root`'s routing exactly (route_kino: live assign,
+        // then inherited prior root, then inbox) — otherwise a root would
+        // archive/prune events it didn't actually commit, losing lineage.
+        if route_kino(&e.id, &live_assigns, declared_roots, owned_roots)? == root_name {
             owned.push(e);
         }
     }
@@ -835,6 +895,7 @@ fn maybe_archive_owned_events(
     root_name: &str,
     events: &[Event],
     declared_roots: &BTreeSet<String>,
+    owned_roots: &BTreeMap<String, String>,
     params: &CommitParams,
 ) -> Result<Option<(String, Vec<Hash>)>, CommitError> {
     // The caller only invokes us after a real version bump, so in the
@@ -843,7 +904,8 @@ fn maybe_archive_owned_events(
     // died before staging the archive, a replay against an already-clean
     // ledger (staged events consumed by GC) would find nothing to archive
     // and must bail cleanly rather than write a zero-event archive.
-    let owned_refs = collect_owned_staged_events(events, root_name, declared_roots)?;
+    let owned_refs =
+        collect_owned_staged_events(events, root_name, declared_roots, owned_roots)?;
     if owned_refs.is_empty() {
         return Ok(None);
     }
@@ -1055,6 +1117,7 @@ fn prune_staged_events(
     events: &[Event],
     root_name: &str,
     declared_roots: &BTreeSet<String>,
+    owned_roots: &BTreeMap<String, String>,
     root: &RootKinograph,
     policy: &RootPolicy,
     implicit_pinned: &BTreeSet<(String, String)>,
@@ -1099,9 +1162,7 @@ fn prune_staged_events(
         if !e.is_store_event() || e.kind == "root" {
             continue;
         }
-        let target = kino_target_root(&e.id, &live_assigns, declared_roots)?;
-        let target_name = target.as_deref().unwrap_or("inbox");
-        if target_name == root_name {
+        if route_kino(&e.id, &live_assigns, declared_roots, owned_roots)? == root_name {
             owned_stores_by_id.entry(e.id.clone()).or_default().push(e);
         }
     }
@@ -1173,6 +1234,12 @@ pub fn commit_all(
     // against — conservative and deterministic.
     let refs = ExternalRefs::collect(kinora_root, &declared_roots, &events)?;
 
+    // Snapshot kino->root ownership from the prior committed roots, so an
+    // unassigned revision inherits its current root instead of falling to
+    // `inbox` (kinora-egur). Like `refs`, this is a batch-start snapshot —
+    // every root in the loop routes against the same view.
+    let owned = collect_root_ownership(kinora_root, &declared_roots)?;
+
     // Iterate non-commits roots first (in name order), then `commits`
     // last. The commits root's job is to consume the archive-assigns each
     // other root produces during this batch — so it must run after every
@@ -1194,6 +1261,7 @@ pub fn commit_all(
             &config,
             &declared_roots,
             &events,
+            &owned,
             &refs,
         );
         out.push((name.clone(), result));
@@ -1213,6 +1281,7 @@ pub fn commit_all(
             &config,
             &declared_roots,
             &fresh_events,
+            &owned,
             &fresh_refs,
         );
         out.push((COMMITS_ROOT.to_owned(), result));
@@ -1691,7 +1760,7 @@ mod tests {
         let a = make(&"aa".repeat(32), vec!["bb".repeat(32)]);
         let b = make(&"bb".repeat(32), vec!["aa".repeat(32)]);
         let declared: BTreeSet<String> = BTreeSet::from(["inbox".to_owned()]);
-        let err = build_root(&[a, b], "inbox", &declared, None).unwrap_err();
+        let err = build_root(&[a, b], "inbox", &declared, &BTreeMap::new(), None).unwrap_err();
         assert!(matches!(err, CommitError::NoHead { .. }), "got: {err:?}");
     }
 
@@ -3435,7 +3504,7 @@ roots {
             parents: vec![],
         };
         let prior = RootKinograph::with_entries(vec![pinned.clone()]);
-        let built = build_root(&[], "main", &declared, Some(&prior)).unwrap();
+        let built = build_root(&[], "main", &declared, &BTreeMap::new(), Some(&prior)).unwrap();
         assert_eq!(built.entries, vec![pinned]);
     }
 
@@ -3464,7 +3533,7 @@ roots {
         }
         .to_event();
         let built =
-            build_root(&[reassign], "main", &declared, Some(&prior)).unwrap();
+            build_root(&[reassign], "main", &declared, &BTreeMap::new(), Some(&prior)).unwrap();
         assert!(
             built.entries.is_empty(),
             "reassigned kino must not merge back: {:?}",
@@ -3503,6 +3572,7 @@ roots {
             std::slice::from_ref(&store),
             "inbox",
             &declared_with_inbox,
+            &BTreeMap::new(),
             Some(&prior),
         )
         .unwrap();
@@ -3524,7 +3594,7 @@ roots {
         let k = store_md(&root, b"hello", "hello", "2026-04-10T12:34:56Z");
         let declared: BTreeSet<String> = BTreeSet::from(["inbox".to_owned()]);
         let events = Ledger::new(&root).read_all_events().unwrap();
-        let built = build_root(&events, "inbox", &declared, None).unwrap();
+        let built = build_root(&events, "inbox", &declared, &BTreeMap::new(), None).unwrap();
         let entry = built
             .entries
             .iter()
@@ -3534,6 +3604,212 @@ roots {
             entry.head_ts, "2026-04-10T12:34:56Z",
             "entry.head_ts must match the head store event's ts",
         );
+    }
+
+    #[test]
+    fn metadata_rename_without_reassign_updates_committed_root() {
+        // kinora-egur: a metadata-only rename (same content+id, no --parents,
+        // no --root) of an already-committed kino must update the committed
+        // root's entry name — not strand the kino in inbox with the old name.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+
+        let v1 = store_md(&root, b"body", "old-name", "2026-04-19T10:00:00Z");
+        write_assign(
+            &root,
+            &AssignEvent {
+                kino_id: v1.id.clone(),
+                target_root: "main".into(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-19T10:00:01Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // Rename: identical content and id, new name, no parents, no assign.
+        store_kino(
+            &root,
+            StoreKinoParams {
+                kind: "markdown".into(),
+                content: b"body".to_vec(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-19T10:00:03Z".into(),
+                metadata: BTreeMap::from([("name".into(), "new-name".into())]),
+                id: Some(v1.id.clone()),
+                parents: vec![],
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:04Z")).unwrap();
+
+        // The committed `main` root reflects the new name.
+        let store = ContentStore::new(&root);
+        let main_hash = read_root_pointer(&root, "main").unwrap().expect("main pointer");
+        let main_kg = RootKinograph::parse(&store.read(&main_hash).unwrap()).unwrap();
+        let entry = main_kg
+            .entries
+            .iter()
+            .find(|e| e.id == v1.id)
+            .expect("renamed kino must remain in main");
+        assert_eq!(
+            entry.metadata.get("name").map(String::as_str),
+            Some("new-name"),
+            "committed root kept the stale name",
+        );
+
+        // And the rename must not have split the kino into inbox.
+        if let Some(inbox_hash) = read_root_pointer(&root, "inbox").unwrap() {
+            let inbox_kg = RootKinograph::parse(&store.read(&inbox_hash).unwrap()).unwrap();
+            assert!(
+                !inbox_kg.entries.iter().any(|e| e.id == v1.id),
+                "renamed kino leaked into inbox: {:?}",
+                inbox_kg.entries,
+            );
+        }
+    }
+
+    #[test]
+    fn unassigned_revision_inherits_prior_root_not_inbox() {
+        // A genuine new version (with --parents) of a main-owned kino, stored
+        // without re-asserting the assign, stays in main rather than falling
+        // to inbox.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+}
+"#,
+        );
+
+        let v1 = store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
+        write_assign(
+            &root,
+            &AssignEvent {
+                kino_id: v1.id.clone(),
+                target_root: "main".into(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-19T10:00:01Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // v2 references v1, no fresh assign.
+        store_kino(
+            &root,
+            StoreKinoParams {
+                kind: "markdown".into(),
+                content: b"v2".to_vec(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-19T10:00:03Z".into(),
+                metadata: BTreeMap::from([("name".into(), "doc".into())]),
+                id: Some(v1.id.clone()),
+                parents: vec![v1.hash.clone()],
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:04Z")).unwrap();
+
+        let store = ContentStore::new(&root);
+        let main_hash = read_root_pointer(&root, "main").unwrap().expect("main pointer");
+        let main_kg = RootKinograph::parse(&store.read(&main_hash).unwrap()).unwrap();
+        let entry = main_kg
+            .entries
+            .iter()
+            .find(|e| e.id == v1.id)
+            .expect("revision must stay in main");
+        assert_ne!(entry.version, v1.hash, "main should point at v2, not v1");
+
+        // brand-new unassigned kino still defaults to inbox.
+        let fresh = store_md(&root, b"fresh", "fresh", "2026-04-19T10:00:05Z");
+        commit_all(&root, params("yj", "2026-04-19T10:00:06Z")).unwrap();
+        let inbox_hash = read_root_pointer(&root, "inbox").unwrap().expect("inbox pointer");
+        let inbox_kg = RootKinograph::parse(&store.read(&inbox_hash).unwrap()).unwrap();
+        assert!(
+            inbox_kg.entries.iter().any(|e| e.id == fresh.id),
+            "brand-new unassigned kino should default to inbox",
+        );
+    }
+
+    #[test]
+    fn sibling_root_commit_does_not_prune_inherited_revision() {
+        // Archive/prune ownership must match build_root's routing. Two never
+        // roots: v1 -> main. Then a bare revision v2 (inherits main) is staged
+        // alongside a brand-new kino `w` that routes to inbox. In one
+        // commit_all, inbox commits before main and produces a version (for
+        // `w`) — it must NOT archive/prune v2 just because v2 has no assign,
+        // or v2's staged event would vanish before main ever commits it.
+        let (_t, root) = setup();
+        write_config(
+            &root,
+            r#"repo-url "https://example.com/x.git"
+roots {
+  main { policy "never" }
+  inbox { policy "never" }
+}
+"#,
+        );
+
+        let v1 = store_md(&root, b"v1", "doc", "2026-04-19T10:00:00Z");
+        write_assign(
+            &root,
+            &AssignEvent {
+                kino_id: v1.id.clone(),
+                target_root: "main".into(),
+                supersedes: vec![],
+                author: "yj".into(),
+                ts: "2026-04-19T10:00:01Z".into(),
+                provenance: "test".into(),
+            },
+        )
+        .unwrap();
+        commit_all(&root, params("yj", "2026-04-19T10:00:02Z")).unwrap();
+
+        // Bare revision of v1 (inherits main), and a brand-new inbox kino.
+        store_kino(
+            &root,
+            StoreKinoParams {
+                kind: "markdown".into(),
+                content: b"v2".to_vec(),
+                author: "yj".into(),
+                provenance: "test".into(),
+                ts: "2026-04-19T10:00:03Z".into(),
+                metadata: BTreeMap::from([("name".into(), "doc".into())]),
+                id: Some(v1.id.clone()),
+                parents: vec![v1.hash.clone()],
+            },
+        )
+        .unwrap();
+        store_md(&root, b"w", "w", "2026-04-19T10:00:04Z");
+
+        commit_all(&root, params("yj", "2026-04-19T10:00:05Z")).unwrap();
+
+        // main must hold v2 — the revision survived inbox's commit step.
+        let store = ContentStore::new(&root);
+        let main_hash = read_root_pointer(&root, "main").unwrap().expect("main pointer");
+        let main_kg = RootKinograph::parse(&store.read(&main_hash).unwrap()).unwrap();
+        let entry = main_kg
+            .entries
+            .iter()
+            .find(|e| e.id == v1.id)
+            .expect("kino must remain in main");
+        assert_ne!(entry.version, v1.hash, "main must advance to v2, not keep v1");
     }
 
     #[test]

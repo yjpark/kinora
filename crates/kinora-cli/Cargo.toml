@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 kinora = { path = "../kinora" }
 facet = { workspace = true }
+facet-json = { workspace = true }
 gix = { workspace = true }
 fastrace = { workspace = true, features = ["enable"] }
 figue = { workspace = true }

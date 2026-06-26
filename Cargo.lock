@@ -1920,6 +1920,7 @@ name = "kinora-cli"
 version = "0.0.1"
 dependencies = [
  "facet",
+ "facet-json",
  "fastrace",
  "figue",
  "gix",
