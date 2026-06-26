@@ -1,11 +1,11 @@
 ---
 # kinora-9as9
 title: Re-versioning a committed kino forks across roots (synthesis drops lineage)
-status: in-progress
+status: completed
 type: bug
 priority: high
 created_at: 2026-06-26T00:47:51Z
-updated_at: 2026-06-26T00:59:48Z
+updated_at: 2026-06-26T01:00:00Z
 ---
 
 Revising a kino after it has been committed produces a fork: 'resolve' reports MultipleHeads and 'commit' becomes a no-op because no single head can be picked.
@@ -70,3 +70,30 @@ parents; no-op detection unaffected). Addressed:
 - [x] Issue 3 (minor): `validate_entry` now validates each `parents[]` hash.
 - [x] Issue 4 (coverage): added a 3-version chain split across three roots
       test, a parent-union test, and a parents-hash-validation test.
+
+## Summary of Changes
+
+Root cause: `ingest_root_kinographs` synthesized events from committed root
+kinograph entries with empty parents, discarding lineage. The safety claim in
+the old comment ("a staged v2 still demotes the synthesized v1") only held
+while v2 was still staged; once v2 was itself committed and pruned, both
+versions were synthesized parent-less and neither demoted the other. This
+surfaced whenever a kino's versions ended up in different roots — the common
+case, since a bare `store --id X --parents H` carries no live assign and routes
+to inbox while the original stays in its root.
+
+Fix: carry lineage on the durable record.
+- `RootEntry` gains an optional `parents: Vec<String>` field (backward-compatible
+  via `#[facet(default)]`; absent on legacy blobs = empty). Validated as hashes.
+- `build_root` populates it from the head event's parents (captured at commit
+  time, while the head is still staged with authentic parents).
+- `ingest_root_kinographs` synthesizes with those parents, processes root
+  pointers in sorted order, and unions parents across roots on (id,version)
+  collision for deterministic, order-independent head resolution.
+
+Tests: cross-root 2-version (was the failing repro), same-root revision
+(boundary), 3-version chain split across three roots, parent union across
+roots, RootEntry parents roundtrip, legacy-entry default, invalid-parent-hash
+rejection. Full workspace suite green (398 + 115 + 72 + 26), zero warnings.
+
+Files: crates/kinora/src/{root.rs,commit.rs,resolve.rs}.
