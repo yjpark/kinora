@@ -434,13 +434,16 @@ pub fn build_root(
             continue;
         }
         let head = pick_head(&id, &group)?;
-        entries.push(RootEntry::new(
-            head.id.clone(),
-            head.hash.clone(),
-            head.kind.clone(),
-            head.metadata.clone(),
-            head.ts.clone(),
-        ));
+        entries.push(
+            RootEntry::new(
+                head.id.clone(),
+                head.hash.clone(),
+                head.kind.clone(),
+                head.metadata.clone(),
+                head.ts.clone(),
+            )
+            .with_parents(head.parents.clone()),
+        );
     }
 
     // Merge in prior-root entries that are missing from the fresh build.
@@ -3429,6 +3432,7 @@ roots {
             note: String::new(),
             pin: true,
             head_ts: String::new(),
+            parents: vec![],
         };
         let prior = RootKinograph::with_entries(vec![pinned.clone()]);
         let built = build_root(&[], "main", &declared, Some(&prior)).unwrap();
@@ -3548,6 +3552,7 @@ roots {
             note: String::new(),
             pin: false,
             head_ts: "2026-04-05T10:00:00Z".into(), // 14 days older than `now`
+            parents: vec![],
         };
         let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
@@ -3586,6 +3591,7 @@ roots {
             note: String::new(),
             pin: false,
             head_ts: String::new(),
+            parents: vec![],
         };
         let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
@@ -3622,6 +3628,7 @@ roots {
             note: String::new(),
             pin: false,
             head_ts: "not-a-timestamp".into(),
+            parents: vec![],
         };
         let mut kg = RootKinograph::with_entries(vec![entry]);
         let policy = RootPolicy::MaxAge("7d".into());
@@ -3798,6 +3805,7 @@ roots {
             note: String::new(),
             pin: true,
             head_ts: "2026-04-01T00:00:00Z".into(),
+            parents: vec![],
         }]);
         let mut fresh = RootKinograph::with_entries(vec![RootEntry {
             id: id.clone(),
@@ -3807,6 +3815,7 @@ roots {
             note: String::new(),
             pin: false,
             head_ts: "2026-04-10T00:00:00Z".into(),
+            parents: vec![],
         }]);
 
         propagate_pins(&mut fresh, Some(&prior));
