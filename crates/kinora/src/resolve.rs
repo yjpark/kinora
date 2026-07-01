@@ -321,7 +321,9 @@ fn ingest_root_kinographs(
             if let Some(&idx) = synth_loc.get(&key) {
                 // Already synthesized from an earlier root: union parents so
                 // an ancestor named by any root is demoted from head.
-                let events = by_id.get_mut(&re.id).expect("synth id present");
+                let Some(events) = by_id.get_mut(&re.id) else {
+                    continue;
+                };
                 let existing = &mut events[idx].1;
                 for p in re.parents {
                     if !existing.parents.contains(&p) {

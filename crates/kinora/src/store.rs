@@ -50,14 +50,18 @@ impl ContentStore {
         }
         let ext = ext_for_kind(kind);
         let path = store_blob_path_with_ext(&self.kinora_root, &hash, ext);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let parent = path.parent().ok_or_else(|| {
+            StoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("blob path has no parent dir: {}", path.display()),
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
         let tmp_name = match ext {
             Some(e) => format!(".tmp-{}.{e}", hash.as_hex()),
             None => format!(".tmp-{}", hash.as_hex()),
         };
-        let tmp = path.parent().expect("shard dir").join(tmp_name);
+        let tmp = parent.join(tmp_name);
         fs::write(&tmp, content)?;
         fs::rename(&tmp, &path)?;
         Ok(hash)

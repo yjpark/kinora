@@ -214,20 +214,25 @@ impl StencilFile {
                                 reason: "`stencil:end` takes no arguments".to_owned(),
                             });
                         }
-                        let open_ro = open.take().unwrap();
-                        blocks.push(Block::ReadOnly {
-                            indent: open_ro.indent,
-                            name: open_ro.name,
-                            hash: open_ro.hash,
-                            content: open_ro.content,
-                        });
+                        if let Some(open_ro) = open.take() {
+                            blocks.push(Block::ReadOnly {
+                                indent: open_ro.indent,
+                                name: open_ro.name,
+                                hash: open_ro.hash,
+                                content: open_ro.content,
+                            });
+                        }
                     }
                     Some(mk) if mk.directive == DIR_RO => {
                         return Err(ParseError::NestedReadOnly { line: lineno });
                     }
                     // Any other line (including stray non-`ro` markers) is
                     // stencil-owned read-only content.
-                    _ => open.as_mut().unwrap().content.push(line.to_owned()),
+                    _ => {
+                        if let Some(open) = open.as_mut() {
+                            open.content.push(line.to_owned());
+                        }
+                    }
                 }
                 continue;
             }

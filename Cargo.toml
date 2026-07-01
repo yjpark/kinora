@@ -14,10 +14,19 @@ license = "MIT"
 repository = "https://github.com/edger-dev/kinora"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "forbid"          # rule: (rung 2) unsafe is forbidden outright
 
+# Lint rules live in the kinora `rules` root. Each line below is a rung-1 rule
+# projected into clippy config; the `# rule:` tag cites the rule kino it
+# enforces. Promote a line to "deny" to graduate it to rung 2. See the "Lint
+# Rules" section of CLAUDE.md.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+unwrap_used = "warn"            # rule: jig::rust::no-unwrap-in-lib
+expect_used = "warn"            # rule: jig::rust::no-unwrap-in-lib
+todo = "warn"                   # rule: jig::rust::no-todo-committed
+unimplemented = "warn"          # rule: jig::rust::no-todo-committed
+dbg_macro = "warn"              # rule: jig::rust::no-todo-committed
 
 [workspace.dependencies]
 

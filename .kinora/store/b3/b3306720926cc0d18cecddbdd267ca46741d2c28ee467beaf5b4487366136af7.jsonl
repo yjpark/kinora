@@ -1,0 +1,3 @@
+{"@schema":"kinora-commit-archive-v1"}
+{"event_kind":"store","kind":"markdown","id":"6864dd4c01edac081bdf4334f4ec165b3fc57cc6573788535453fcb28df6168e","hash":"6864dd4c01edac081bdf4334f4ec165b3fc57cc6573788535453fcb28df6168e","parents":[],"ts":"2026-07-01T15:49:02.868152278Z","author":"YJ Park","provenance":"user","metadata":{"name":"adopt-jig-lint-rules:task","status::resolved":"true"}}
+{"event_kind":"assign","kind":"kin::assign","id":"6864dd4c01edac081bdf4334f4ec165b3fc57cc6573788535453fcb28df6168e","hash":"6864dd4c01edac081bdf4334f4ec165b3fc57cc6573788535453fcb28df6168e","parents":[],"ts":"2026-07-01T15:49:02.868152278Z","author":"YJ Park","provenance":"user","metadata":{"kin::target_root":"tasks"}}
